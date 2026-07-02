@@ -1,0 +1,12 @@
+build/
+install/
+log/
+.vscode/
+.gemini/
+.agents/
+**/__pycache__/
+*.pyc
+
+# API 키/비밀값 파일 제외 규칙
+.env
+**/.env
