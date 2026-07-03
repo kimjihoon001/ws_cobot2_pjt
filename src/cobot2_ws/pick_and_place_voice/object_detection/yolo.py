@@ -10,7 +10,7 @@ from ultralytics import YOLO
 import numpy as np
 
 
-PACKAGE_NAME = "pick_and_place_voice"
+PACKAGE_NAME = "object_detection"
 PACKAGE_PATH = get_package_share_directory(PACKAGE_NAME)
 
 YOLO_MODEL_FILENAME = "yolov8n_tools_0122.pt"
@@ -20,14 +20,21 @@ YOLO_MODEL_PATH = os.path.join(PACKAGE_PATH, "resource", YOLO_MODEL_FILENAME)
 YOLO_JSON_PATH = os.path.join(PACKAGE_PATH, "resource", YOLO_CLASS_NAME_JSON)
 
 
+import torch
+
+
 class YoloModel:
     def __init__(self):
         self.model = YOLO(YOLO_MODEL_PATH)
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.model.to(self.device)
+        print(f"YOLO initialized on device: {self.device}")
+        
         with open(YOLO_JSON_PATH, "r", encoding="utf-8") as file:
             class_dict = json.load(file)
             self.reversed_class_dict = {v: int(k) for k, v in class_dict.items()}
 
-    def get_frames(self, img_node, duration=1.0):
+    def get_frames(self, img_node, duration=0.1):
         """get frames while target_time"""
         end_time = time.time() + duration
         frames = {}
@@ -48,11 +55,11 @@ class YoloModel:
 
     def get_best_detection(self, img_node, target):
         rclpy.spin_once(img_node)
-        frames = self.get_frames(img_node)
+        frames = self.get_frames(img_node, duration=0.1)
         if not frames:  # Check if frames are empty
             return None
 
-        results = self.model(frames, verbose=False)
+        results = self.model(frames, device=self.device, verbose=False)
         print("classes: ")
         print(results[0].names)
         detections = self._aggregate_detections(results)
