@@ -1,8 +1,10 @@
 export type ResourceStatus = 'normal' | 'low' | 'out'
+export type ResourceItemType = 'material' | 'product'
 
 export interface Resource {
   id: number
   name: string
+  item_type: ResourceItemType
   category: string
   quantity: number
   unit: string
@@ -15,6 +17,7 @@ export interface Resource {
 
 export interface ResourceInput {
   name: string
+  item_type: ResourceItemType
   category: string
   quantity: number
   unit: string

@@ -1,15 +1,44 @@
 import type { Resource } from '../types/resource'
 import { StatusBadge } from './StatusBadge'
+import { SortableTh } from './SortableTh'
+import type { SortDir } from '../utils/sort'
+
+export type ResourceSortKey =
+  | 'id'
+  | 'name'
+  | 'item_type'
+  | 'category'
+  | 'location'
+  | 'quantity'
+  | 'min_quantity'
+  | 'status'
+
+const ITEM_TYPE_LABEL: Record<Resource['item_type'], string> = {
+  material: '원자재',
+  product: '완제품',
+}
 
 interface Props {
   resources: Resource[]
   canManage: boolean
+  sortKey: ResourceSortKey
+  sortDir: SortDir
+  onSort: (key: ResourceSortKey) => void
   onAdjust: (resource: Resource, delta: number) => void
   onEdit: (resource: Resource) => void
   onDelete: (resource: Resource) => void
 }
 
-export function ResourceTable({ resources, canManage, onAdjust, onEdit, onDelete }: Props) {
+export function ResourceTable({
+  resources,
+  canManage,
+  sortKey,
+  sortDir,
+  onSort,
+  onAdjust,
+  onEdit,
+  onDelete,
+}: Props) {
   if (resources.length === 0) {
     return <p className="empty-state">등록된 자원이 없습니다. 상단에서 자원을 추가하세요.</p>
   }
@@ -18,13 +47,14 @@ export function ResourceTable({ resources, canManage, onAdjust, onEdit, onDelete
     <table className="resource-table">
       <thead>
         <tr>
-          <th>번호</th>
-          <th>이름</th>
-          <th>분류</th>
-          <th>위치</th>
-          <th className="num-col">수량</th>
-          <th className="num-col">최소수량</th>
-          <th>상태</th>
+          <SortableTh label="번호" sortKey="id" activeKey={sortKey} dir={sortDir} onSort={onSort} className="num-col" />
+          <SortableTh label="이름" sortKey="name" activeKey={sortKey} dir={sortDir} onSort={onSort} />
+          <SortableTh label="구분" sortKey="item_type" activeKey={sortKey} dir={sortDir} onSort={onSort} />
+          <SortableTh label="분류" sortKey="category" activeKey={sortKey} dir={sortDir} onSort={onSort} />
+          <SortableTh label="위치" sortKey="location" activeKey={sortKey} dir={sortDir} onSort={onSort} />
+          <SortableTh label="수량" sortKey="quantity" activeKey={sortKey} dir={sortDir} onSort={onSort} className="num-col" />
+          <SortableTh label="최소수량" sortKey="min_quantity" activeKey={sortKey} dir={sortDir} onSort={onSort} className="num-col" />
+          <SortableTh label="상태" sortKey="status" activeKey={sortKey} dir={sortDir} onSort={onSort} />
           <th>관리</th>
         </tr>
       </thead>
@@ -33,6 +63,7 @@ export function ResourceTable({ resources, canManage, onAdjust, onEdit, onDelete
           <tr key={r.id}>
             <td className="num-col">{r.id}</td>
             <td>{r.name}</td>
+            <td>{ITEM_TYPE_LABEL[r.item_type]}</td>
             <td>{r.category || '-'}</td>
             <td>{r.location || '-'}</td>
             <td className="num-col">

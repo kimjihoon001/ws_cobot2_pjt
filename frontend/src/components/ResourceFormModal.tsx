@@ -10,6 +10,7 @@ interface Props {
 
 const EMPTY: ResourceInput = {
   name: '',
+  item_type: 'material',
   category: '',
   quantity: 0,
   unit: 'EA',
@@ -22,6 +23,7 @@ export function ResourceFormModal({ initial, onSubmit, onClose }: Props) {
     initial
       ? {
           name: initial.name,
+          item_type: initial.item_type,
           category: initial.category,
           quantity: initial.quantity,
           unit: initial.unit,
@@ -62,6 +64,19 @@ export function ResourceFormModal({ initial, onSubmit, onClose }: Props) {
             onChange={(e) => setForm({ ...form, name: e.target.value })}
             autoFocus
           />
+        </label>
+
+        <label>
+          구분
+          <select
+            value={form.item_type}
+            onChange={(e) =>
+              setForm({ ...form, item_type: e.target.value as ResourceInput['item_type'] })
+            }
+          >
+            <option value="material">원자재</option>
+            <option value="product">완제품</option>
+          </select>
         </label>
 
         <label>

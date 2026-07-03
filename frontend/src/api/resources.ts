@@ -1,4 +1,5 @@
-import type { Resource, ResourceInput, ResourceStatus, Summary } from '../types/resource'
+import type { Resource, ResourceInput, ResourceItemType, ResourceStatus, Summary } from '../types/resource'
+import type { InventoryLog } from '../types/inventoryLog'
 import { request } from './client'
 
 const BASE = '/api/resources'
@@ -6,6 +7,7 @@ const BASE = '/api/resources'
 export interface ListFilters {
   search?: string
   category?: string
+  item_type?: ResourceItemType
   status?: ResourceStatus
 }
 
@@ -13,6 +15,7 @@ export function listResources(filters: ListFilters = {}): Promise<Resource[]> {
   const params = new URLSearchParams()
   if (filters.search) params.set('search', filters.search)
   if (filters.category) params.set('category', filters.category)
+  if (filters.item_type) params.set('item_type', filters.item_type)
   if (filters.status) params.set('status', filters.status)
   const qs = params.toString()
   return request<Resource[]>(`${BASE}${qs ? `?${qs}` : ''}`)
@@ -39,4 +42,8 @@ export function adjustQuantity(id: number, delta: number): Promise<Resource> {
 
 export function deleteResource(id: number): Promise<void> {
   return request<void>(`${BASE}/${id}`, { method: 'DELETE' })
+}
+
+export function listInventoryLogs(limit = 100): Promise<InventoryLog[]> {
+  return request<InventoryLog[]>(`${BASE}/logs?limit=${limit}`)
 }
