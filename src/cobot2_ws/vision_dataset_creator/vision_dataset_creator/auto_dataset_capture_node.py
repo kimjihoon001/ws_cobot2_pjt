@@ -57,7 +57,7 @@ class AutoDatasetCaptureNode(Node):
         self.OBJECT_POS = [550.0, 43.0, 30.0]
         
         # 물체로부터 카메라를 얼마나 띄울지 (구형 궤적의 반지름, 단위: mm)
-        self.DISTANCE = 200.0
+        self.DISTANCE = 300.0
 
         # 로봇 끝단(TCP)과 실제 카메라 렌즈 사이의 Y축 거리 차이 (단위: mm)
         # 카메라가 로봇팔 끝에서 Y축 방향(측면)으로 75mm 떨어져 있으므로 75.0을 줍니다.
