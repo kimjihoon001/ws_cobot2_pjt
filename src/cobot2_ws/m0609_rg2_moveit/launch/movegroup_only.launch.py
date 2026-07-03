@@ -29,6 +29,8 @@ def load_yaml(package_name, file_path):
         return None
 
 
+from launch_ros.parameter_descriptions import ParameterValue
+
 def generate_launch_description():
 
     args = [
@@ -40,7 +42,7 @@ def generate_launch_description():
 
     xacro_file = os.path.join(bringup_pkg, 'urdf', 'm0609_with_rg2.urdf.xacro')
     robot_description = {
-        'robot_description': Command(['xacro ', xacro_file])
+        'robot_description': ParameterValue(Command(['xacro ', xacro_file]), value_type=str)
     }
 
     srdf_file = os.path.join(moveit_pkg, 'config', 'm0609_rg2.srdf')

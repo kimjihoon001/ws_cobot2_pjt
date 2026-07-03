@@ -9,4 +9,31 @@
 
   <!-- RG2 그리퍼를 tool0에 부착 -->
   <xacro:onrobot_rg2 prefix="rg2_" effector_base="tool0" has_bracket="true"/>
+
+  <!-- 테이블 정의 (x: 1200mm, y: 650mm, z: 250mm) -->
+  <link name="table">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="1.2 0.65 0.25"/>
+      </geometry>
+      <material name="table_material">
+        <color rgba="0.6 0.6 0.6 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="1.2 0.65 0.25"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- base_link에 테이블 고정 (로봇은 x=280mm에 위치, y는 중앙) -->
+  <joint name="base_to_table" type="fixed">
+    <parent link="base_link"/>
+    <child link="table"/>
+    <origin xyz="0.32 0 -0.125" rpy="0 0 0"/>
+  </joint>
+
 </robot>
