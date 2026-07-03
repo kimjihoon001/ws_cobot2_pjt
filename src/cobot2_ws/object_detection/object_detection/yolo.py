@@ -25,14 +25,26 @@ import torch
 
 class YoloModel:
     def __init__(self):
-        self.model = YOLO(YOLO_MODEL_PATH)
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.model.to(self.device)
-        print(f"YOLO initialized on device: {self.device}")
-        
+
+        # Load tool model
+        self.tool_model = YOLO(YOLO_MODEL_PATH)
+        self.tool_model.to(self.device)
         with open(YOLO_JSON_PATH, "r", encoding="utf-8") as file:
-            class_dict = json.load(file)
-            self.reversed_class_dict = {v: int(k) for k, v in class_dict.items()}
+            tool_class_dict = json.load(file)
+            self.tool_reversed_class_dict = {v: int(k) for k, v in tool_class_dict.items()}
+
+        # Load hand model
+        self.hand_model_path = os.path.join(PACKAGE_PATH, "resource", "hand_yolov8n.pt")
+        self.hand_json_path = os.path.join(PACKAGE_PATH, "resource", "class_name_hand.json")
+        
+        self.hand_model = YOLO(self.hand_model_path)
+        self.hand_model.to(self.device)
+        with open(self.hand_json_path, "r", encoding="utf-8") as file:
+            hand_class_dict = json.load(file)
+            self.hand_reversed_class_dict = {v: int(k) for k, v in hand_class_dict.items()}
+
+        print(f"YOLO models initialized on device: {self.device}")
 
     def get_frames(self, img_node, duration=0.1):
         """get frames while target_time"""
@@ -57,13 +69,25 @@ class YoloModel:
         rclpy.spin_once(img_node)
         frames = self.get_frames(img_node, duration=0.1)
         if not frames:  # Check if frames are empty
-            return None
+            return None, None
 
-        results = self.model(frames, device=self.device, verbose=False)
+        if target == 'hand':
+            model = self.hand_model
+            class_dict = self.hand_reversed_class_dict
+        else:
+            model = self.tool_model
+            class_dict = self.tool_reversed_class_dict
+
+        results = model(frames, device=self.device, verbose=False)
         print("classes: ")
         print(results[0].names)
         detections = self._aggregate_detections(results)
-        label_id = self.reversed_class_dict[target]
+        
+        if target not in class_dict:
+            print(f"Target '{target}' not in class dictionary.")
+            return None, None
+
+        label_id = class_dict[target]
         print("label_id: ", label_id)
         print("detections: ", detections)
 
