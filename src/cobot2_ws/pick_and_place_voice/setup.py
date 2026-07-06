@@ -35,7 +35,9 @@ setup(
     entry_points={
         'console_scripts': [
             'robot_control = robot_control.robot_control:main',
+            'jenga_inspector = robot_control.jenga_inspector:main',
             'object_detection = object_detection.detection:main',
+            'jenga_detection = object_detection.jenga_detection:main',
             'get_keyword = voice_processing.get_keyword:main',
             'tool_obstacle_publisher = object_detection.tool_obstacle_publisher:main',
         ],

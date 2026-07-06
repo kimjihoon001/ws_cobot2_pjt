@@ -36,4 +36,30 @@
     <origin xyz="0.32 0 -0.125" rpy="0 0 0"/>
   </joint>
 
+  <!-- 컨베이어 벨트 정의 (X: 1200mm, Y: 120mm, Z: 80mm) -->
+  <link name="conveyor_belt">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://m0609_rg2_bringup/meshes/conveyor_belt.stl"/>
+      </geometry>
+      <material name="conveyor_material">
+        <color rgba="0.2 0.2 0.2 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://m0609_rg2_bringup/meshes/conveyor_belt.stl"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- 테이블의 -Y 모서리 상면(+Z방향, 테이블 위)에 컨베이어 벨트 고정 -->
+  <joint name="table_to_conveyor" type="fixed">
+    <parent link="table"/>
+    <child link="conveyor_belt"/>
+    <origin xyz="0 -0.265 0.165" rpy="0 0 0"/>
+  </joint>
+
 </robot>

@@ -28,6 +28,7 @@ setup(
     entry_points={
         'console_scripts': [
             'object_detection = object_detection.detection:main',
+            'jenga_detection = object_detection.jenga_detection:main',
             'tool_obstacle_publisher = object_detection.tool_obstacle_publisher:main',
         ],
     },

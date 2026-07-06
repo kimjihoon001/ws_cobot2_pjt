@@ -28,6 +28,7 @@ setup(
     entry_points={
         'console_scripts': [
             'robot_control = robot_control.robot_control:main',
+            'jenga_inspector = robot_control.jenga_inspector:main',
         ],
     },
 )
