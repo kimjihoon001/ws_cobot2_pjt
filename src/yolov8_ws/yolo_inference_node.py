@@ -9,7 +9,6 @@ from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge
 import cv2
 import numpy as np
-from scipy.spatial.transform import Rotation
 
 try:
     from ultralytics import YOLO
@@ -40,18 +39,9 @@ class YoloInferenceNode(Node):
         
         self.bridge = CvBridge()
         self.latest_image = None
-        self.new_image_available = False # CPU 과부하 방지용 플래그
+        self.new_image_available = False
         self.depth_frame = None
         self.intrinsics = None
-        
-        # 캘리브레이션 데이터 로드
-        calib_path = '/home/rokey/corecode/Calibration_Tutorial/T_gripper2camera.npy'
-        if os.path.exists(calib_path):
-            self.T_gripper2camera = np.load(calib_path)
-            self.get_logger().info('T_gripper2camera 캘리브레이션 행렬 로드 성공.')
-        else:
-            self.get_logger().warn('캘리브레이션 파일이 없습니다. (임시 단위 행렬 적용)')
-            self.T_gripper2camera = np.eye(4)
         
         self.image_sub = self.create_subscription(Image, '/camera/camera/color/image_raw', self.image_callback, 10)
         self.depth_sub = self.create_subscription(Image, '/camera/camera/aligned_depth_to_color/image_raw', self.depth_callback, 10)
@@ -69,14 +59,13 @@ class YoloInferenceNode(Node):
         self.FIXED_PITCH = 45.0
         self.current_yaw = None
         
-        # 로봇 마지막 위치 저장 변수
-        self.last_pos = None
-        
-        # 스레드 충돌 방지용 락 (generator already executing 오류 해결)
         self.robot_lock = threading.Lock()
         
+        self.last_inference_time = 0.0
+        self.inference_interval = 0.2 # 초당 5프레임 제한
+        
         self.get_logger().info('=========================================')
-        self.get_logger().info(' YOLO Inference Node Started.')
+        self.get_logger().info(' YOLO Inference Node (Relative Depth Mode) Started.')
         self.get_logger().info(' [조작 방법]')
         self.get_logger().info(' M   : 수동 제어(직접 교시) On/Off 토글')
         self.get_logger().info(' 1   : right_back (-135도) 이동')
@@ -102,13 +91,25 @@ class YoloInferenceNode(Node):
         except Exception as e:
             pass
 
-    def get_robot_pose_matrix(self, x, y, z, rx, ry, rz):
-        R = Rotation.from_euler('ZYZ', [rx, ry, rz], degrees=True).as_matrix()
-        T = np.eye(4)
-        T[:3, :3] = R
-        T[:3, 3] = [x, y, z]
-        return T
+    def get_vertical_depth(self, u, v, Z_c, pitch_deg=45.0):
+        """
+        카메라가 바닥을 향해 pitch_deg 만큼 기울어져 있을 때,
+        특정 픽셀(u,v)의 진짜 수직 깊이(바닥 방향으로의 직진 거리)를 계산합니다.
+        """
+        if Z_c <= 0 or self.intrinsics is None:
+            return None
+            
+        theta = np.radians(pitch_deg)
+        fy = self.intrinsics['fy']
+        ppy = self.intrinsics['ppy']
+        
+        # 카메라 렌즈 기준 Y 좌표 계산
+        Y_c = (v - ppy) * Z_c / fy
+        
+        # 수직 깊이 계산 (기하학적 보정)
 
+
+    # ===== 로봇 이동 관련 수식 =====
     def calculate_tcp_pose(self, camera_pos, target_pos, y_offset=0.0):
         c = np.array(camera_pos)
         t = np.array(target_pos)
@@ -192,7 +193,7 @@ def main(args=None):
     DR_init.__dsr__node = dsr_node
     
     try:
-        from DSR_ROBOT2 import task_compliance_ctrl, release_compliance_ctrl, get_current_posx
+        from DSR_ROBOT2 import task_compliance_ctrl, release_compliance_ctrl
     except ImportError as e:
         print(f"Error importing DSR_ROBOT2: {e}")
         sys.exit(1)
@@ -203,58 +204,75 @@ def main(args=None):
         while rclpy.ok():
             rclpy.spin_once(node, timeout_sec=0.01)
             
-            # 새 이미지가 수신되었을 때만 추론 실행 (CPU 폭주 방지)
-            if node.latest_image is not None and node.new_image_available:
+            current_time = time.time()
+            if node.latest_image is not None and node.new_image_available and (current_time - node.last_inference_time) >= node.inference_interval:
                 node.new_image_available = False
+                node.last_inference_time = current_time
                 
                 results = node.model(node.latest_image, verbose=False)
                 annotated_frame = results[0].plot()
                 
+                # 'entire'와 'hole'의 깊이를 비교하여 상대적인 높이(층수) 측정
                 if node.depth_frame is not None and node.intrinsics is not None:
                     try:
-                        # 로봇이 이동 중이 아닐 때만 위치 갱신 (generator already executing 및 list out of range 방지)
-                        if not node.is_moving:
-                            with node.robot_lock:
-                                pos_res = get_current_posx()
-                                if pos_res and len(pos_res) > 0 and len(pos_res[0]) >= 6:
-                                    node.last_pos = pos_res[0]
+                        entire_box = None
+                        hole_boxes = []
                         
-                        if node.last_pos is not None:
-                            T_base2gripper = node.get_robot_pose_matrix(*node.last_pos)
-                            T_base2camera = T_base2gripper @ node.T_gripper2camera
+                        # 1. 클래스별로 바운딩 박스 분류
+                        names = results[0].names
+                        for box in results[0].boxes:
+                            cls_name = names[int(box.cls[0])]
+                            if cls_name == 'entire':
+                                entire_box = box
+                            elif cls_name == 'hole':
+                                hole_boxes.append(box)
+                                
+                        # 2. 'entire' 박스가 존재하면 바닥면(가장 아랫부분) 깊이 계산
+                        if entire_box is not None:
+                            ex1, ey1, ex2, ey2 = entire_box.xyxy[0].cpu().numpy()
+                            # entire 박스의 하단 중앙 픽셀을 탑의 바닥(테이블과 닿는 곳)으로 간주
+                            eu = int((ex1 + ex2) / 2)
+                            ev = int(ey2)
                             
-                            for box in results[0].boxes:
-                                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                                u = int((x1 + x2) / 2)
-                                v = int((y1 + y2) / 2)
+                            eu_clp = np.clip(eu, 0, node.depth_frame.shape[1]-1)
+                            ev_clp = np.clip(ev, 0, node.depth_frame.shape[0]-1)
+                            
+                            entire_Z = float(node.depth_frame[ev_clp, eu_clp])
+                            entire_v_depth = node.get_vertical_depth(eu_clp, ev_clp, entire_Z, pitch_deg=node.FIXED_PITCH)
+                            
+                            if entire_v_depth is not None:
+                                # 기준점(entire 바닥) 화면에 파란색 원으로 표시
+                                cv2.circle(annotated_frame, (eu_clp, ev_clp), 7, (255, 0, 0), -1)
                                 
-                                u_clp = np.clip(u, 0, node.depth_frame.shape[1]-1)
-                                v_clp = np.clip(v, 0, node.depth_frame.shape[0]-1)
-                                
-                                Z_c = float(node.depth_frame[v_clp, u_clp])
-                                
-                                if Z_c > 0:
-                                    fx = node.intrinsics['fx']
-                                    fy = node.intrinsics['fy']
-                                    ppx = node.intrinsics['ppx']
-                                    ppy = node.intrinsics['ppy']
+                                # 3. 각 'hole'들의 상대 높이 및 층수 계산
+                                for box in hole_boxes:
+                                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                                    u = int((x1 + x2) / 2)
+                                    v = int((y1 + y2) / 2)
                                     
-                                    X_c = (u_clp - ppx) * Z_c / fx
-                                    Y_c = (v_clp - ppy) * Z_c / fy
+                                    u_clp = np.clip(u, 0, node.depth_frame.shape[1]-1)
+                                    v_clp = np.clip(v, 0, node.depth_frame.shape[0]-1)
                                     
-                                    P_camera = np.array([X_c, Y_c, Z_c, 1.0])
-                                    P_base = T_base2camera @ P_camera
+                                    obj_Z = float(node.depth_frame[v_clp, u_clp])
+                                    obj_v_depth = node.get_vertical_depth(u_clp, v_clp, obj_Z, pitch_deg=node.FIXED_PITCH)
                                     
-                                    base_z = P_base[2]
-                                    
-                                    cv2.circle(annotated_frame, (u, v), 5, (0, 0, 255), -1)
-                                    cv2.putText(annotated_frame, f"Z:{base_z:.1f}mm", (u+10, v-10),
-                                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                                    if obj_v_depth is not None:
+                                        # entire 바닥 수직 깊이에서 hole의 수직 깊이를 뺌
+                                        relative_height = entire_v_depth - obj_v_depth
+                                        relative_height = max(0.0, relative_height)
+                                        
+                                        # 젠가 1층 높이를 약 15mm로 가정하고 층수(Floor) 계산
+                                        floor_num = int(relative_height / 14.0) + 1
+                                        
+                                        # 화면에 중심점(빨간색 원)과 측정된 층수/높이 출력
+                                        cv2.circle(annotated_frame, (u, v), 5, (0, 0, 255), -1)
+                                        cv2.putText(annotated_frame, f"F:{floor_num} ({relative_height:.1f}mm)", (u+10, v-10),
+                                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                     except Exception as e:
-                        node.get_logger().error(f"3D 좌표 계산 오류: {e}")
+                        node.get_logger().error(f"상대 깊이 계산 오류: {e}")
                 
                 cv2.imshow("YOLOv8 Inference & Control", annotated_frame)
-                key = cv2.waitKey(20) & 0xFF # 20ms 대기 (초당 50프레임 제한)
+                key = cv2.waitKey(20) & 0xFF
                 
                 if key == 27:
                     break
@@ -304,7 +322,6 @@ def main(args=None):
                 except Exception:
                     pass
             else:
-                # 새 이미지가 없을 경우 리소스를 위해 약간 대기
                 cv2.waitKey(10)
 
     except KeyboardInterrupt:
