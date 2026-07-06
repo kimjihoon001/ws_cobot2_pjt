@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 import os
 import sys
+# Force importing system OpenCV (4.5.4) with GUI support instead of local headless OpenCV (5.0.0)
+sys.path.insert(0, '/usr/lib/python3/dist-packages')
+
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
