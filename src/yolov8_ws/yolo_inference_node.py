@@ -96,12 +96,15 @@ class YoloInferenceNode(Node):
             return None
             
         theta = np.radians(pitch_deg)
-        fy = self.intrinsics['fy']
-        ppy = self.intrinsics['ppy']
+        fx = self.intrinsics['fx']
+        ppx = self.intrinsics['ppx']
         
-        Y_c = (v - ppy) * Z_c / fy
+        # 카메라가 시계방향 90도로 누워있으므로, 화면의 가로(u)축이 실제 세상의 세로(높이) 방향입니다.
+        # 왼쪽(u=0)이 바닥, 오른쪽(u=width)이 꼭대기를 향하므로, 기존의 Y_c 역할을 -X_c가 대신합니다.
+        X_c = (u - ppx) * Z_c / fx
+        virtual_Y_c = -X_c
         
-        vertical_depth = Z_c * np.sin(theta) + Y_c * np.cos(theta)
+        vertical_depth = Z_c * np.sin(theta) + virtual_Y_c * np.cos(theta)
         return vertical_depth
 
     # ===== 로봇 이동 관련 수식 =====
@@ -228,21 +231,25 @@ def main(args=None):
                             eu = int((ex1 + ex2) / 2)
                             ev = int((ey1 + ey2) / 2)
                             
-                            # 깊이 센서 노이즈(0)를 방지하기 위해, 중심에서 십자형으로 유효한 값을 찾습니다.
-                            valid_entire_Z = 0.0
+                            # 화면이 90도 돌아가 있으므로, 진짜 앞면을 찾으려면 가로(u)가 아니라 세로(v) 방향으로 스캔해야 합니다.
+                            valid_entire_Z = float('inf')
                             valid_eu, valid_ev = eu, ev
-                            offsets = [(0,0), (0,-3), (0,3), (-3,0), (3,0), (0,-7), (0,7), (-7,0), (7,0)]
                             
-                            for dx, dy in offsets:
-                                tu = np.clip(eu + dx, 0, node.depth_frame.shape[1]-1)
-                                tv = np.clip(ev + dy, 0, node.depth_frame.shape[0]-1)
+                            scan_ey_start = int(ey1) + 10
+                            scan_ey_end = int(ey2) - 10
+                            
+                            for scan_v in range(scan_ey_start, scan_ey_end + 1, 5):
+                                tu = np.clip(eu, 0, node.depth_frame.shape[1]-1)
+                                tv = np.clip(scan_v, 0, node.depth_frame.shape[0]-1)
                                 val = float(node.depth_frame[tv, tu])
-                                if val > 0:
+                                if 0 < val < valid_entire_Z:
                                     valid_entire_Z = val
                                     valid_eu, valid_ev = tu, tv
-                                    break
                             
-                            entire_v_depth = node.get_vertical_depth(valid_eu, valid_ev, valid_entire_Z, pitch_deg=node.FIXED_PITCH)
+                            if valid_entire_Z == float('inf'):
+                                entire_v_depth = None
+                            else:
+                                entire_v_depth = node.get_vertical_depth(valid_eu, valid_ev, valid_entire_Z, pitch_deg=node.FIXED_PITCH)
                             
                             if entire_v_depth is None:
                                 node.get_logger().warn(f"entire 박스 중심({eu}, {ev})의 깊이값이 유효하지 않습니다. (노이즈)")
@@ -256,21 +263,32 @@ def main(args=None):
                                     u = int((x1 + x2) / 2)
                                     v = int((y1 + y2) / 2)
                                     
-                                    # 구멍의 중심점 깊이 측정 (노이즈 대비 주변 십자형 탐색)
-                                    obj_Z = 0.0
-                                    valid_u, valid_v = u, v
+                                    # 화면이 누워있으므로, 구멍의 위/아래(화면상 세로 v축)를 스캔하여 블록 앞면을 찾습니다.
+                                    valid_Z_candidates = []
+                                    valid_v_candidates = []
                                     
-                                    for dx, dy in offsets:
-                                        tu = np.clip(u + dx, 0, node.depth_frame.shape[1]-1)
-                                        tv = np.clip(v + dy, 0, node.depth_frame.shape[0]-1)
+                                    scan_y_start = int(y1) - 20
+                                    scan_y_end = int(y2) + 20
+                                    
+                                    for scan_v in range(scan_y_start, scan_y_end + 1, 5):
+                                        tu = np.clip(u, 0, node.depth_frame.shape[1]-1)
+                                        tv = np.clip(scan_v, 0, node.depth_frame.shape[0]-1)
                                         val = float(node.depth_frame[tv, tu])
                                         if val > 0:
-                                            obj_Z = val
-                                            valid_u, valid_v = tu, tv
-                                            break
+                                            valid_Z_candidates.append(val)
+                                            valid_v_candidates.append(tv)
                                             
-                                    obj_v_depth = node.get_vertical_depth(valid_u, valid_v, obj_Z, pitch_deg=node.FIXED_PITCH)
-                                    
+                                    if len(valid_Z_candidates) > 0:
+                                        # 가장 Z값이 작은(카메라에 가까운) 픽셀이 해당 층의 '진짜 블록 앞면'입니다.
+                                        min_idx = np.argmin(valid_Z_candidates)
+                                        obj_Z = valid_Z_candidates[min_idx]
+                                        valid_v = valid_v_candidates[min_idx]
+                                        valid_u = u
+                                        
+                                        obj_v_depth = node.get_vertical_depth(valid_u, valid_v, obj_Z, pitch_deg=node.FIXED_PITCH)
+                                    else:
+                                        obj_v_depth = None
+                                        
                                     if obj_v_depth is not None:
                                         # entire 중심 수직 깊이에서 hole 중심 수직 깊이를 뺌 (결과가 양수면 hole이 위에 있음, 음수면 아래에 있음)
                                         relative_height = entire_v_depth - obj_v_depth
