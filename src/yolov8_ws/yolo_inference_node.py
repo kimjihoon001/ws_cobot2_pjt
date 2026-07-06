@@ -92,10 +92,6 @@ class YoloInferenceNode(Node):
             pass
 
     def get_vertical_depth(self, u, v, Z_c, pitch_deg=45.0):
-        """
-        카메라가 바닥을 향해 pitch_deg 만큼 기울어져 있을 때,
-        특정 픽셀(u,v)의 진짜 수직 깊이(바닥 방향으로의 직진 거리)를 계산합니다.
-        """
         if Z_c <= 0 or self.intrinsics is None:
             return None
             
@@ -103,11 +99,10 @@ class YoloInferenceNode(Node):
         fy = self.intrinsics['fy']
         ppy = self.intrinsics['ppy']
         
-        # 카메라 렌즈 기준 Y 좌표 계산
         Y_c = (v - ppy) * Z_c / fy
         
-        # 수직 깊이 계산 (기하학적 보정)
-
+        vertical_depth = Z_c * np.sin(theta) + Y_c * np.cos(theta)
+        return vertical_depth
 
     # ===== 로봇 이동 관련 수식 =====
     def calculate_tcp_pose(self, camera_pos, target_pos, y_offset=0.0):
@@ -212,62 +207,86 @@ def main(args=None):
                 results = node.model(node.latest_image, verbose=False)
                 annotated_frame = results[0].plot()
                 
-                # 'entire'와 'hole'의 깊이를 비교하여 상대적인 높이(층수) 측정
                 if node.depth_frame is not None and node.intrinsics is not None:
                     try:
                         entire_box = None
                         hole_boxes = []
                         
-                        # 1. 클래스별로 바운딩 박스 분류
                         names = results[0].names
+                        detected_classes = []
                         for box in results[0].boxes:
                             cls_name = names[int(box.cls[0])]
+                            detected_classes.append(cls_name)
                             if cls_name == 'entire':
                                 entire_box = box
-                            elif cls_name == 'hole':
+                            elif 'hole' in cls_name.lower():
                                 hole_boxes.append(box)
-                                
-                        # 2. 'entire' 박스가 존재하면 바닥면(가장 아랫부분) 깊이 계산
+                        
+                        # 2. 'entire' 박스가 존재하면 기준점(중심점) 깊이 계산
                         if entire_box is not None:
                             ex1, ey1, ex2, ey2 = entire_box.xyxy[0].cpu().numpy()
-                            # entire 박스의 하단 중앙 픽셀을 탑의 바닥(테이블과 닿는 곳)으로 간주
                             eu = int((ex1 + ex2) / 2)
-                            ev = int(ey2)
+                            ev = int((ey1 + ey2) / 2)
                             
-                            eu_clp = np.clip(eu, 0, node.depth_frame.shape[1]-1)
-                            ev_clp = np.clip(ev, 0, node.depth_frame.shape[0]-1)
+                            # 깊이 센서 노이즈(0)를 방지하기 위해, 중심에서 십자형으로 유효한 값을 찾습니다.
+                            valid_entire_Z = 0.0
+                            valid_eu, valid_ev = eu, ev
+                            offsets = [(0,0), (0,-3), (0,3), (-3,0), (3,0), (0,-7), (0,7), (-7,0), (7,0)]
                             
-                            entire_Z = float(node.depth_frame[ev_clp, eu_clp])
-                            entire_v_depth = node.get_vertical_depth(eu_clp, ev_clp, entire_Z, pitch_deg=node.FIXED_PITCH)
+                            for dx, dy in offsets:
+                                tu = np.clip(eu + dx, 0, node.depth_frame.shape[1]-1)
+                                tv = np.clip(ev + dy, 0, node.depth_frame.shape[0]-1)
+                                val = float(node.depth_frame[tv, tu])
+                                if val > 0:
+                                    valid_entire_Z = val
+                                    valid_eu, valid_ev = tu, tv
+                                    break
                             
-                            if entire_v_depth is not None:
-                                # 기준점(entire 바닥) 화면에 파란색 원으로 표시
-                                cv2.circle(annotated_frame, (eu_clp, ev_clp), 7, (255, 0, 0), -1)
+                            entire_v_depth = node.get_vertical_depth(valid_eu, valid_ev, valid_entire_Z, pitch_deg=node.FIXED_PITCH)
+                            
+                            if entire_v_depth is None:
+                                node.get_logger().warn(f"entire 박스 중심({eu}, {ev})의 깊이값이 유효하지 않습니다. (노이즈)")
+                            else:
+                                # 기준점(entire 중심) 화면에 파란색 원으로 표시
+                                cv2.circle(annotated_frame, (valid_eu, valid_ev), 7, (255, 0, 0), -1)
                                 
-                                # 3. 각 'hole'들의 상대 높이 및 층수 계산
-                                for box in hole_boxes:
+                                # 3. 각 'hole'들의 상대 높이 및 층수 차이 계산
+                                for idx, box in enumerate(hole_boxes):
                                     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                                     u = int((x1 + x2) / 2)
                                     v = int((y1 + y2) / 2)
                                     
-                                    u_clp = np.clip(u, 0, node.depth_frame.shape[1]-1)
-                                    v_clp = np.clip(v, 0, node.depth_frame.shape[0]-1)
+                                    # 구멍의 중심점 깊이 측정 (노이즈 대비 주변 십자형 탐색)
+                                    obj_Z = 0.0
+                                    valid_u, valid_v = u, v
                                     
-                                    obj_Z = float(node.depth_frame[v_clp, u_clp])
-                                    obj_v_depth = node.get_vertical_depth(u_clp, v_clp, obj_Z, pitch_deg=node.FIXED_PITCH)
+                                    for dx, dy in offsets:
+                                        tu = np.clip(u + dx, 0, node.depth_frame.shape[1]-1)
+                                        tv = np.clip(v + dy, 0, node.depth_frame.shape[0]-1)
+                                        val = float(node.depth_frame[tv, tu])
+                                        if val > 0:
+                                            obj_Z = val
+                                            valid_u, valid_v = tu, tv
+                                            break
+                                            
+                                    obj_v_depth = node.get_vertical_depth(valid_u, valid_v, obj_Z, pitch_deg=node.FIXED_PITCH)
                                     
                                     if obj_v_depth is not None:
-                                        # entire 바닥 수직 깊이에서 hole의 수직 깊이를 뺌
+                                        # entire 중심 수직 깊이에서 hole 중심 수직 깊이를 뺌 (결과가 양수면 hole이 위에 있음, 음수면 아래에 있음)
                                         relative_height = entire_v_depth - obj_v_depth
-                                        relative_height = max(0.0, relative_height)
                                         
-                                        # 젠가 1층 높이를 약 15mm로 가정하고 층수(Floor) 계산
-                                        floor_num = int(relative_height / 14.0) + 1
+                                        # 젠가 1층 높이를 약 15mm로 가정하고 상대적인 층수 차이(Floor diff) 계산
+                                        floor_diff = int(round(relative_height / 15.0))
+                                        
+                                        # 터미널에 로그로 층수 차이와 높이 출력
+                                        node.get_logger().info(f"[Hole {idx+1}] entire 기준 상대 층수: {floor_diff:+}층 / 높이 차이: {relative_height:+.1f}mm")
                                         
                                         # 화면에 중심점(빨간색 원)과 측정된 층수/높이 출력
-                                        cv2.circle(annotated_frame, (u, v), 5, (0, 0, 255), -1)
-                                        cv2.putText(annotated_frame, f"F:{floor_num} ({relative_height:.1f}mm)", (u+10, v-10),
+                                        cv2.circle(annotated_frame, (valid_u, valid_v), 5, (0, 0, 255), -1)
+                                        cv2.putText(annotated_frame, f"{floor_diff:+}F", (u+10, v-10),
                                                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                                    else:
+                                        node.get_logger().warn(f"Hole {idx+1} 중심점 주변 깊이값이 유효하지 않습니다.")
                     except Exception as e:
                         node.get_logger().error(f"상대 깊이 계산 오류: {e}")
                 
