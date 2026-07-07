@@ -12,10 +12,12 @@ from rclpy.duration import Duration
 from moveit_msgs.action import MoveGroup
 from moveit_msgs.msg import (
     MotionPlanRequest, Constraints, PlanningOptions, RobotState,
-    PositionConstraint, OrientationConstraint,
+    PositionConstraint, OrientationConstraint, JointConstraint,
+    CollisionObject, AttachedCollisionObject,
 )
-from shape_msgs.msg import SolidPrimitive
-from geometry_msgs.msg import Pose
+from moveit_msgs.srv import GetPositionIK
+from shape_msgs.msg import SolidPrimitive, Mesh, MeshTriangle
+from geometry_msgs.msg import Pose, PoseStamped, Point
 from sensor_msgs.msg import Image, CameraInfo, JointState
 from cv_bridge import CvBridge
 from ultralytics import YOLO
@@ -72,6 +74,38 @@ def quat_from_rpy(roll, pitch, yaw):
     )
 
 
+def load_stl_mesh(filepath):
+    mesh = Mesh()
+    vertices_map = {}
+    current_triangle = []
+    
+    with open(filepath, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith('vertex'):
+                parts = line.split()
+                # vertex x y z
+                x = float(parts[1])
+                y = float(parts[2])
+                z = float(parts[3])
+                
+                # 이미 m 단위이므로 스케일링 불필요
+                pt_key = (round(x, 6), round(y, 6), round(z, 6))
+                if pt_key not in vertices_map:
+                    p = Point()
+                    p.x, p.y, p.z = x, y, z
+                    vertices_map[pt_key] = len(mesh.vertices)
+                    mesh.vertices.append(p)
+                
+                current_triangle.append(vertices_map[pt_key])
+                if len(current_triangle) == 3:
+                    triangle = MeshTriangle()
+                    triangle.vertex_indices = current_triangle
+                    mesh.triangles.append(triangle)
+                    current_triangle = []
+    return mesh
+
+
 class PickYoloTarget(Node):
 
     def __init__(self):
@@ -94,14 +128,24 @@ class PickYoloTarget(Node):
         self.intrinsics = None
         self.camera_frame_id = None
         self.current_joint6 = None
+        self.current_joint_state = None
 
         self.create_subscription(Image, '/camera/camera/color/image_raw', self._color_cb, 10)
         self.create_subscription(Image, '/camera/camera/aligned_depth_to_color/image_raw', self._depth_cb, 10)
         self.create_subscription(CameraInfo, '/camera/camera/color/camera_info', self._camera_info_cb, 10)
         self.create_subscription(JointState, '/joint_states', self._joint_state_cb, 10)
 
+        # YOLO 탐지 시각화 이미지 퍼블리셔 (rqt_image_view로 확인)
+        self._vis_pub = self.create_publisher(Image, '/yolo_detection/image', 1)
+
+        # MoveIt PlanningScene 관리용 퍼블리셔
+        self._collision_pub = self.create_publisher(CollisionObject, '/collision_object', 10)
+        self._attached_collision_pub = self.create_publisher(AttachedCollisionObject, '/attached_collision_object', 10)
+
         self.tf_buffer = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self, spin_thread=True)
+        # TransformListener 전용 노드를 분리하고 백그라운드 스레드에서 스핀하도록 설정 (콜백 큐 간섭 방지)
+        self.tf_node = Node('tf_listener_node')
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self.tf_node, spin_thread=True)
 
         self._move_ac = ActionClient(self, MoveGroup, '/move_action')
         self.get_logger().info('move_group 대기중...')
@@ -116,7 +160,17 @@ class PickYoloTarget(Node):
             while not self._gripper_cli.wait_for_service(timeout_sec=1.0):
                 self.get_logger().info('  ... /onrobot/sendCommand 응답 없음, 재시도 중...')
                 rclpy.spin_once(self, timeout_sec=0.1)
+
+        self._ik_cli = self.create_client(GetPositionIK, '/compute_ik')
+        self.get_logger().info('/compute_ik 대기중...')
+        while not self._ik_cli.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('  ... /compute_ik 응답 없음, 재시도 중...')
+            rclpy.spin_once(self, timeout_sec=0.1)
         self.get_logger().info('준비 완료')
+
+    def destroy_node(self):
+        self.tf_node.destroy_node()
+        super().destroy_node()
 
     def _color_cb(self, msg):
         self.color_frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
@@ -129,6 +183,7 @@ class PickYoloTarget(Node):
         self.intrinsics = {'fx': msg.k[0], 'fy': msg.k[4], 'ppx': msg.k[2], 'ppy': msg.k[5]}
 
     def _joint_state_cb(self, msg):
+        self.current_joint_state = msg
         if 'joint_6' in msg.name:
             self.current_joint6 = msg.position[msg.name.index('joint_6')]
 
@@ -183,8 +238,17 @@ class PickYoloTarget(Node):
         # 임계값 표시
         cv2.putText(vis, f'Threshold: {CONFIDENCE_THRESHOLD:.0%}  Target: {TARGET_CLASS}',
                     (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        cv2.imshow('YOLO Detection', vis)
-        cv2.waitKey(1)
+        # ROS 토픽으로 발행 (rqt_image_view에서 /yolo_detection/image 구독)
+        # cv_bridge + OpenCV5 호환 문제 우회: Image 메시지 직접 생성
+        from sensor_msgs.msg import Image as ImageMsg
+        vis_u8 = np.ascontiguousarray(vis, dtype=np.uint8)
+        msg = ImageMsg()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.height, msg.width = vis_u8.shape[:2]
+        msg.encoding = 'bgr8'
+        msg.step = msg.width * 3
+        msg.data = vis_u8.tobytes()
+        self._vis_pub.publish(msg)
 
     def detect_once(self, timeout_sec=DETECT_TIMEOUT_SEC):
         """color/depth/intrinsics가 갖춰지면 TARGET_CLASS 중 최고 confidence 탐지 1건을 반환."""
@@ -224,7 +288,6 @@ class PickYoloTarget(Node):
             head_px = np.mean([kpts_xy[j] for j in role['head_idx']], axis=0)
             tail_px = np.array(kpts_xy[role['tail_idx']])
 
-            cv2.destroyAllWindows()  # 탐지 완료 시 창 닫기
             self.get_logger().info(f'{TARGET_CLASS} 탐지 (conf={score:.2f}, depth={depth_m:.3f}m)')
             return cx_px, cy_px, depth_m, head_px, tail_px
 
@@ -242,9 +305,22 @@ class PickYoloTarget(Node):
         pose_camera.position.z = depth_m
         pose_camera.orientation.w = 1.0
 
-        transform = self.tf_buffer.lookup_transform(
-            PLANNING_FRAME, self.camera_frame_id, rclpy.time.Time(),
-            timeout=Duration(seconds=1.0))
+        # DDS transient local (/tf_static) 디스커버리 및 버퍼링 시간 확보를 위한 재시도 루프
+        import tf2_ros
+        max_retries = 10
+        for i in range(max_retries):
+            try:
+                transform = self.tf_buffer.lookup_transform(
+                    PLANNING_FRAME, self.camera_frame_id, rclpy.time.Time(),
+                    timeout=Duration(seconds=1.0))
+                break
+            except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
+                if i == max_retries - 1:
+                    self.get_logger().error(f"TF 조회 최종 실패: {e}")
+                    raise e
+                self.get_logger().warn(f"TF 조회 대기 중 ({i+1}/{max_retries}): {e}")
+                rclpy.spin_once(self, timeout_sec=1.0)
+        
         pose_base = do_transform_pose(pose_camera, transform)
         return pose_base.position.x, pose_base.position.y, pose_base.position.z
 
@@ -267,7 +343,7 @@ class PickYoloTarget(Node):
         hx, hy, _ = self.pixel_to_base_xyz(int(round(head_px[0])), int(round(head_px[1])), head_depth)
         tx, ty, _ = self.pixel_to_base_xyz(int(round(tail_px[0])), int(round(tail_px[1])), tail_depth)
         axis_angle = math.atan2(hy - ty, hx - tx)
-        yaw = axis_angle + math.pi / 2
+        yaw = axis_angle  # 해머 축과 수직 방향으로 잡기 위해 90도 돌린 각도 반영 (기존 +pi/2가 평행으로 동작했으므로 제거)
         yaw = math.atan2(math.sin(yaw), math.cos(yaw))  # -180~180도로 정규화
 
         # 평행 2핑거 그리퍼는 yaw와 yaw+180도*k가 전부 같은 파지 결과.
@@ -358,6 +434,208 @@ class PickYoloTarget(Node):
             self.get_logger().error(f'그리퍼 명령 실패: {command!r}')
         return res is not None and res.success
 
+    def solve_ik(self, x, y, z, yaw, seed_joints=None) -> list[float] | None:
+        """주어진 x, y, z, yaw에 대해 IK를 해결. 특이점 및 joint_5 리밋 회피를 위해 미세 틸트 순회."""
+        # 틸트 오프셋 후보 (Roll, Pitch 오프셋 라디안 단위, 약 ±5도 및 ±10도)
+        tilts = [
+            (0.0, 0.0),          # 1. 완전 수직 top-down
+            (0.0, 0.087),        # 2. Pitch +5 deg
+            (0.0, -0.087),       # 3. Pitch -5 deg
+            (0.087, 0.0),        # 4. Roll +5 deg
+            (-0.087, 0.0),       # 5. Roll -5 deg
+            (0.0, 0.174),        # 6. Pitch +10 deg
+            (0.0, -0.174),       # 7. Pitch -10 deg
+            (0.174, 0.0),        # 8. Roll +10 deg
+            (-0.174, 0.0),       # 9. Roll -10 deg
+        ]
+
+        for d_roll, d_pitch in tilts:
+            pose = Pose()
+            pose.position.x = x
+            pose.position.y = y
+            pose.position.z = z
+            
+            # 틸트 각도를 반영한 RPY 계산
+            roll = GRASP_ROLL + d_roll
+            pitch = GRASP_PITCH + d_pitch
+            qx, qy, qz, qw = quat_from_rpy(roll, pitch, yaw)
+            pose.orientation.x = qx
+            pose.orientation.y = qy
+            pose.orientation.z = qz
+            pose.orientation.w = qw
+
+            req = GetPositionIK.Request()
+            req.ik_request.group_name = GROUP_NAME
+            req.ik_request.ik_link_name = EEF_LINK
+            req.ik_request.avoid_collisions = False
+            
+            # 시드 조인트가 주어지면 이를 사용하고, 없으면 현재 조인트 상태를 사용 (wrist flip 방지)
+            if seed_joints is not None:
+                req.ik_request.robot_state.joint_state.name = [f"joint_{i}" for i in range(1, 7)]
+                req.ik_request.robot_state.joint_state.position = seed_joints
+            elif self.current_joint_state is not None:
+                req.ik_request.robot_state.joint_state = self.current_joint_state
+            
+            # IK 솔버 탐색 시간
+            req.ik_request.timeout = Duration(seconds=1.0).to_msg()
+            
+            pose_stamped = PoseStamped()
+            pose_stamped.header.frame_id = PLANNING_FRAME
+            pose_stamped.pose = pose
+            req.ik_request.pose_stamped = pose_stamped
+            
+            future = self._ik_cli.call_async(req)
+            rclpy.spin_until_future_complete(self, future)
+            res = future.result()
+            
+            if res is not None and res.error_code.val == 1:
+                if d_roll != 0.0 or d_pitch != 0.0:
+                    self.get_logger().info(
+                        f"미세 틸트 각도 적용하여 IK 해 성공: Pitch_offset={math.degrees(d_pitch):.1f}deg, Roll_offset={math.degrees(d_roll):.1f}deg"
+                    )
+                
+                joint_state = res.solution.joint_state
+                joint_names = [f"joint_{i}" for i in range(1, 7)]
+                positions = []
+                for name in joint_names:
+                    if name in joint_state.name:
+                        idx = joint_state.name.index(name)
+                        positions.append(joint_state.position[idx])
+                    else:
+                        self.get_logger().error(f"IK 결과에서 관절 {name}을 찾을 수 없습니다.")
+                        return None
+                return positions
+                
+        self.get_logger().error(f"모든 틸트 후보에 대해 IK 계산 실패 (x={x:.3f}, y={y:.3f}, z={z:.3f})")
+        return None
+
+    def move_to_joints(self, joint_positions: list[float], speed_scale=SPEED_SCALE):
+        goal_constraints = Constraints()
+        joint_names = [f"joint_{i}" for i in range(1, 7)]
+        for name, pos in zip(joint_names, joint_positions):
+            jc = JointConstraint()
+            jc.joint_name = name
+            jc.position = pos
+            jc.tolerance_above = 0.01
+            jc.tolerance_below = 0.01
+            jc.weight = 1.0
+            goal_constraints.joint_constraints.append(jc)
+
+        req = MotionPlanRequest()
+        req.group_name = GROUP_NAME
+        req.start_state = RobotState()
+        req.start_state.is_diff = True
+        req.goal_constraints = [goal_constraints]
+        req.allowed_planning_time = 10.0
+        req.max_velocity_scaling_factor = speed_scale
+        req.max_acceleration_scaling_factor = speed_scale
+
+        opts = PlanningOptions()
+        opts.plan_only = PLAN_ONLY
+
+        goal_msg = MoveGroup.Goal()
+        goal_msg.request = req
+        goal_msg.planning_options = opts
+
+        self.get_logger().info(f'관절 공간 이동: {[f"{math.degrees(p):.1f}" for p in joint_positions]} deg')
+        send_future = self._move_ac.send_goal_async(goal_msg)
+        rclpy.spin_until_future_complete(self, send_future)
+        goal_handle = send_future.result()
+        if not goal_handle.accepted:
+            self.get_logger().error('목표가 move_group에서 거부됨')
+            return False
+
+        result_future = goal_handle.get_result_async()
+        rclpy.spin_until_future_complete(self, result_future)
+        result = result_future.result().result
+
+        if result.error_code.val == 1:
+            self.get_logger().info('관절 공간 이동 완료')
+            return True
+        self.get_logger().error(f'실패: error_code={result.error_code.val}')
+        return False
+
+    def spawn_attached_object(self, obj_id, mesh_msg, x, y, z, yaw, link_name='base_link'):
+        from moveit_msgs.msg import AttachedCollisionObject, CollisionObject
+        
+        aco = AttachedCollisionObject()
+        aco.link_name = link_name
+        
+        co = CollisionObject()
+        co.header.frame_id = PLANNING_FRAME
+        co.id = obj_id
+        
+        pose = Pose()
+        # yaw 방향으로 9cm(메쉬 길이 18cm의 절반)만큼 뒤로 밀어서, 검출된 중심점 (x,y,z)에 스크루드라이버의 기하학적 중심이 정렬되도록 오프셋 적용
+        pose.position.x = x - 0.09 * math.cos(yaw)
+        pose.position.y = y - 0.09 * math.sin(yaw)
+        pose.position.z = z
+        
+        # 서 있는 스크루드라이버 STL 메쉬를 90도 피치 회전시켜 눕히고 yaw 적용
+        qx, qy, qz, qw = quat_from_rpy(0.0, math.pi / 2, yaw)
+        pose.orientation.x = qx
+        pose.orientation.y = qy
+        pose.orientation.z = qz
+        pose.orientation.w = qw
+        
+        co.meshes = [mesh_msg]
+        co.mesh_poses = [pose]
+        co.operation = CollisionObject.ADD
+        
+        aco.object = co
+        # 터치 허용 링크 설정: 그리퍼 핑거들이 메쉬와 충돌해도 MoveIt이 에러(-27)를 내지 않도록 설정
+        aco.touch_links = [
+            'rg2_left_inner_finger', 'rg2_right_inner_finger', 
+            'rg2_left_inner_knuckle', 'rg2_right_inner_knuckle',
+            'rg2_left_outer_knuckle', 'rg2_right_outer_knuckle',
+            'rg2_base_link'
+        ]
+        
+        for _ in range(5):
+            self._attached_collision_pub.publish(aco)
+            time.sleep(0.1)
+        self.get_logger().info(f"물체 '{obj_id}'가 '{link_name}'에 부착된 상태(실제 장애물 판정)로 스폰되었습니다.")
+
+    def attach_object_to_gripper(self, obj_id, mesh_msg):
+        from moveit_msgs.msg import AttachedCollisionObject, CollisionObject
+        
+        aco = AttachedCollisionObject()
+        aco.link_name = EEF_LINK
+        
+        co = CollisionObject()
+        co.header.frame_id = EEF_LINK  # 그리퍼 팁(rg2_tcp) 기준 좌표계
+        co.id = obj_id
+        
+        pose = Pose()
+        # 그리퍼 팁(rg2_tcp) 기준 로컬 좌표계 오프셋 설정
+        # 18cm 스크루드라이버의 기하학적 중심이 rg2_tcp 중심에 오도록 로컬 Z축 기준 -9cm 오프셋 적용
+        pose.position.x = 0.0
+        pose.position.y = 0.0
+        pose.position.z = -0.09
+        
+        # 그리퍼 팁 방향과 일치하도록 메쉬를 눕혀둠 (로컬 피치 90도)
+        qx, qy, qz, qw = quat_from_rpy(0.0, math.pi / 2, 0.0)
+        pose.orientation.x = qx
+        pose.orientation.y = qy
+        pose.orientation.z = qz
+        pose.orientation.w = qw
+        
+        co.meshes = [mesh_msg]
+        co.mesh_poses = [pose]
+        co.operation = CollisionObject.ADD
+        
+        aco.object = co
+        aco.touch_links = [
+            'rg2_left_inner_finger', 'rg2_right_inner_finger', 
+            'rg2_left_inner_knuckle', 'rg2_right_inner_knuckle',
+            'rg2_left_outer_knuckle', 'rg2_right_outer_knuckle',
+            'rg2_base_link'
+        ]
+        
+        for _ in range(5):
+            self._attached_collision_pub.publish(aco)
+            time.sleep(0.1)
+        self.get_logger().info(f"물체 '{obj_id}' 그리퍼에 부착 완료")
     def run(self):
         self.get_logger().info(f'{TARGET_CLASS} 탐지 대기중...')
         detection = self.detect_once()
@@ -371,19 +649,38 @@ class PickYoloTarget(Node):
         self.get_logger().info(
             f'base_link 좌표: ({x:.3f}, {y:.3f}, {z:.3f}), yaw={math.degrees(yaw):.1f}deg')
 
+        # 해머 검출 위치에 screwdriver.stl 메쉬 스폰 (base_link에 부착된 실제 장애물 상태)
+        stl_path = '/home/rokey/ws_cobot2_pjt/src/cobot2_ws/m0609_rg2_bringup/meshes/screwdriver.stl'
+        try:
+            mesh_msg = load_stl_mesh(stl_path)
+            self.spawn_attached_object('hammer', mesh_msg, x, y, z, yaw)
+            self.get_logger().info('해머 위치에 STL 스폰 완료')
+        except Exception as e:
+            self.get_logger().error(f'STL 스폰 실패: {e}')
+
         pregrasp = self.build_pose(x, y, z + PREGRASP_Z_OFFSET, yaw)
         grasp = self.build_pose(x, y, z + GRASP_Z_CLEARANCE, yaw)
 
+        # 관절 공간 제어(Joint Space Control)를 위한 IK 풀이
+        pregrasp_joints = self.solve_ik(x, y, z + PREGRASP_Z_OFFSET, yaw)
+        grasp_joints = self.solve_ik(x, y, z + GRASP_Z_CLEARANCE, yaw, seed_joints=pregrasp_joints)
+ 
+        if pregrasp_joints is None or grasp_joints is None:
+            self.get_logger().error('pregrasp 또는 grasp 포즈에 대한 IK 해를 찾지 못했습니다. 기동을 취소합니다.')
+            return
+
         if not self.gripper_command('o'):
             return
-        if not self.move_to_pose(pregrasp):
+        if not self.move_to_joints(pregrasp_joints):
             return
-        if not self.move_to_pose(grasp):
+        if not self.move_to_joints(grasp_joints):
             return
         if not self.gripper_command('c'):
             return
+        # 그리퍼를 닫은 후, 월드(base_link)에 있던 장애물을 그리퍼 프레임으로 리어태치
+        self.attach_object_to_gripper('hammer', mesh_msg)
         time.sleep(0.5)
-        self.move_to_pose(pregrasp)
+        self.move_to_joints(pregrasp_joints)
         self.get_logger().info('pick 완료')
 
 
