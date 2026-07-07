@@ -115,6 +115,66 @@ python3 src/cobot2_ws/m0609_rg2_bringup/scripts/hand_avoidance.py
 
 ---
 
+## 🧱 3. 젠가 불량 검사 및 실시간 손 회피 시스템 실행 방법 (Real Mode)
+실제 로봇 환경에서 YOLOv8 및 RealSense 카메라를 결합한 젠가 불량 검사 시퀀스를 기동하고, 동작 중 ROI 기반의 손 회피 기능까지 연동하여 작동시키는 가이드입니다.
+
+### 터미널 1: RealSense 카메라 구동
+```bash
+realsense
+```
+
+### 터미널 2: 실제 로봇 드라이버 기동 (IP: 192.168.1.100)
+```bash
+cd ~/ws_cobot2_pjt
+source install/setup.bash
+ros2 launch m0609_rg2_bringup bringup_camera.launch.py mode:=real host:=192.168.1.100
+```
+
+### 터미널 3: MoveIt 모션 플래너 기동
+```bash
+cd ~/ws_cobot2_pjt
+source install/setup.bash
+ros2 launch m0609_rg2_moveit movegroup_only.launch.py
+```
+
+### 터미널 4: YOLO 기반 젠가 타워 및 불량 검사 비전 인식 서비스 구동
+```bash
+cd ~/ws_cobot2_pjt
+source install/setup.bash
+ros2 run object_detection jenga_detection
+```
+
+### 터미널 5: YOLO 기반 손 검출 인식 서비스 노드 구동
+```bash
+cd ~/ws_cobot2_pjt
+source install/setup.bash
+ros2 run object_hand object_hand
+```
+
+### 터미널 6: 실시간 손 장애물 토픽 퍼블리셔 기동
+```bash
+cd ~/ws_cobot2_pjt
+source install/setup.bash
+ros2 run object_hand hand_obstacle_publisher
+```
+
+### 터미널 7: 젠가 불량 검증 및 손 회피 메인 제어 노드 구동
+```bash
+cd ~/ws_cobot2_pjt
+source install/setup.bash
+ros2 run robot_control jenga_inspector
+```
+
+### 터미널 8: 불량 검사 서비스 호출 (Trigger)
+모든 노드가 정상 기동된 상태에서 아래 명령어를 실행하여 젠가 불량 검사 및 손 회피 테스트 시퀀스를 시작합니다.
+```bash
+cd ~/ws_cobot2_pjt
+source install/setup.bash
+ros2 service call /run_jenga_inspection std_srvs/srv/Trigger
+```
+
+---
+
 ## 🔍 문제 해결 및 문제 조치 (Troubleshooting)
 
 ### Q1. 로봇이 움직일 때 덜컹거리는 진동이나 렉이 발생합니다.
