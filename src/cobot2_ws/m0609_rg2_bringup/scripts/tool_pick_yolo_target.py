@@ -1,6 +1,5 @@
 import math
 import struct
-import sys
 import time
 import cv2
 
@@ -11,13 +10,13 @@ from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
 
-from moveit_msgs.action import MoveGroup
+from moveit_msgs.action import MoveGroup, ExecuteTrajectory
 from moveit_msgs.msg import (
     MotionPlanRequest, Constraints, PlanningOptions, RobotState,
     PositionConstraint, OrientationConstraint, JointConstraint,
     CollisionObject, AttachedCollisionObject,
 )
-from moveit_msgs.srv import GetPositionIK
+from moveit_msgs.srv import GetPositionIK, GetCartesianPath
 from shape_msgs.msg import SolidPrimitive, Mesh, MeshTriangle
 from geometry_msgs.msg import Pose, PoseStamped, Point
 from sensor_msgs.msg import Image, CameraInfo, JointState
@@ -28,28 +27,16 @@ import tf2_ros
 from tf2_geometry_msgs import do_transform_pose
 from onrobot_rg_msgs.srv import SetCommand
 
-# 최종 하강(grasp)은 MoveIt 대신 두산 네이티브 movel(직선 보간)로 처리 — MoveIt의
-# top-down 수직 하강 플래닝이 특이점 근처에서 잘 안 되던 문제를 우회하기 위함.
-# pregrasp까지는 그대로 MoveIt(관절공간)으로 이동. jenga_inspector.py와 동일한
-# DR_init 초기화 패턴(임포트 전에 노드부터 만들어야 함).
-ROBOT_ID = 'dsr01'
-ROBOT_MODEL = 'm0609'
-
-import DR_init
-DR_init.__dsr__id = ROBOT_ID
-DR_init.__dsr__model = ROBOT_MODEL
-
-if not rclpy.ok():
-    rclpy.init()
-
-_dsr_node = rclpy.create_node('tool_pick_yolo_target_dsr_node', namespace=ROBOT_ID)
-DR_init.__dsr__node = _dsr_node
-
-try:
-    from DSR_ROBOT2 import movel, get_current_posx, DR_BASE
-except ImportError as e:
-    print(f'DSR_ROBOT2 임포트 실패: {e}')
-    sys.exit()
+# 최종 하강(grasp)은 관절공간 IK 이동 대신 MoveIt Cartesian Path
+# (compute_cartesian_path + ExecuteTrajectory)로 처리 — pregrasp/grasp를 각각
+# solve_ik로 따로 풀면 두 IK가 서로 다른 특이점 회피 틸트를 고를 수 있어 그 사이를
+# 관절공간으로 보간한 경로가 대각선처럼 보일 수 있음. Cartesian Path는 직교좌표상
+# 직선 경로를 직접 보장함.
+# ※ 두산 네이티브 movel/get_current_posx(DSR_ROBOT2.py, dsr_controller2 서비스)는
+# 이 프로젝트의 bringup(_camera).launch.py가 dsr_controller2 컨트롤러를 스폰하지
+# 않고 일반 joint_trajectory_controller(dsr_moveit_controller)만 띄우기 때문에
+# 서비스 자체가 존재하지 않아 사용 불가 (MoveIt Execute를 살리려고 의도적으로
+# 그렇게 설정된 것으로 보임 — 되돌리면 MoveIt 쪽이 깨질 수 있어 시도하지 않음).
 
 MODEL_PATH = '/home/rokey/ws_cobot2_pjt/src/cobot2_ws/voice_processing/resource/toolbest.pt'
 CLASS_NAMES = {0: 'screw2', 1: 'tool-hammer'}
@@ -69,8 +56,7 @@ EEF_LINK = 'rg2_tcp'
 SPEED_SCALE = 0.1              # 낮을수록 천천히 (가상모드라도 우선 저속 유지)
 PREGRASP_Z_OFFSET = 0.15       # 물체 위 접근 높이 (m)
 GRASP_Z_CLEARANCE = 0.02       # 계산된 표면점보다 살짝 위에서 잡기
-DESCENT_VEL_MM_S = 30.0        # pregrasp -> grasp 최종 하강(movel) 속도 (mm/s)
-DESCENT_ACC_MM_S2 = 30.0       # 위와 동일한 movel 가속도 (mm/s^2)
+CARTESIAN_MAX_STEP = 0.01      # pregrasp -> grasp 하강 Cartesian Path 보간 간격 (m)
 
 # 매 실행 시작 시 이동할 홈 자세(관절, degree). robot_control.py의 init_robot()에
 # 있는 범용 JReady와 동일값 (jenga_inspector.py의 JReady는 젠가 스캔 전용 포즈라 다름).
@@ -223,6 +209,25 @@ def load_stl_mesh(filepath, scale=1.0):
     return mesh
 
 
+def scale_trajectory_speed(trajectory, scale):
+    """RobotTrajectory의 시간축을 늘려 실행 속도를 scale배로 낮춘다(1.0=원래 속도).
+    compute_cartesian_path 결과는 속도 스케일 옵션이 없어 기본 속도로 계산되므로,
+    실기에서 SPEED_SCALE만큼 느리게 실행되도록 실행 직전에 재타이밍한다."""
+    for point in trajectory.joint_trajectory.points:
+        t = point.time_from_start.sec + point.time_from_start.nanosec * 1e-9
+        t /= scale
+        sec = int(t)
+        nanosec = int(round((t - sec) * 1e9))
+        if nanosec >= 1_000_000_000:  # 반올림으로 1초를 넘어가는 경우 보정
+            sec += 1
+            nanosec -= 1_000_000_000
+        point.time_from_start.sec = sec
+        point.time_from_start.nanosec = nanosec
+        point.velocities = [v * scale for v in point.velocities]
+        point.accelerations = [a * scale * scale for a in point.accelerations]
+    return trajectory
+
+
 class PickYoloTarget(Node):
 
     def __init__(self):
@@ -283,6 +288,19 @@ class PickYoloTarget(Node):
         while not self._ik_cli.wait_for_service(timeout_sec=1.0):
             self.get_logger().info('  ... /compute_ik 응답 없음, 재시도 중...')
             rclpy.spin_once(self, timeout_sec=0.1)
+
+        self._cartesian_cli = self.create_client(GetCartesianPath, '/compute_cartesian_path')
+        self.get_logger().info('/compute_cartesian_path 대기중...')
+        while not self._cartesian_cli.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('  ... /compute_cartesian_path 응답 없음, 재시도 중...')
+            rclpy.spin_once(self, timeout_sec=0.1)
+
+        self._execute_ac = ActionClient(self, ExecuteTrajectory, '/execute_trajectory')
+        self.get_logger().info('/execute_trajectory 대기중...')
+        while not self._execute_ac.wait_for_server(timeout_sec=1.0):
+            self.get_logger().info('  ... /execute_trajectory 응답 없음, 재시도 중...')
+            rclpy.spin_once(self, timeout_sec=0.1)
+
         self.get_logger().info('준비 완료')
 
     def destroy_node(self):
@@ -676,6 +694,53 @@ class PickYoloTarget(Node):
         self.get_logger().error(f'실패: error_code={result.error_code.val}')
         return False
 
+    def move_cartesian(self, target_pose: Pose, speed_scale=SPEED_SCALE):
+        """현재 자세에서 target_pose까지 직교좌표 직선 경로로 이동(compute_cartesian_path
+        로 경로 계산 후 execute_trajectory로 실행). pregrasp -> grasp 최종 하강처럼
+        관절공간 보간이 아니라 진짜 직선 경로가 필요할 때 사용.
+        GetCartesianPath 서비스 자체엔 속도 스케일 옵션이 없어서, 계산된 궤적을
+        실행 직전에 scale_trajectory_speed로 느리게 재타이밍한다(실물 로봇 안전)."""
+        req = GetCartesianPath.Request()
+        req.header.frame_id = PLANNING_FRAME
+        req.start_state = RobotState()
+        req.start_state.is_diff = True
+        req.group_name = GROUP_NAME
+        req.link_name = EEF_LINK
+        req.waypoints = [target_pose]
+        req.max_step = CARTESIAN_MAX_STEP
+        req.jump_threshold = 0.0
+        req.avoid_collisions = True
+
+        future = self._cartesian_cli.call_async(req)
+        rclpy.spin_until_future_complete(self, future)
+        res = future.result()
+        if res is None or res.fraction < 0.99:
+            fraction = res.fraction if res is not None else 0.0
+            self.get_logger().error(f'Cartesian Path 계산 실패 (fraction={fraction:.2f})')
+            return False
+
+        if PLAN_ONLY:
+            self.get_logger().info('Cartesian Path 계산 완료 (PLAN_ONLY=True라 실행은 생략)')
+            return True
+
+        goal_msg = ExecuteTrajectory.Goal()
+        goal_msg.trajectory = scale_trajectory_speed(res.solution, speed_scale)
+        send_future = self._execute_ac.send_goal_async(goal_msg)
+        rclpy.spin_until_future_complete(self, send_future)
+        goal_handle = send_future.result()
+        if not goal_handle.accepted:
+            self.get_logger().error('Cartesian 경로 실행 목표가 거부됨')
+            return False
+
+        result_future = goal_handle.get_result_async()
+        rclpy.spin_until_future_complete(self, result_future)
+        result = result_future.result().result
+        if result.error_code.val == 1:
+            self.get_logger().info('Cartesian 하강 이동 완료')
+            return True
+        self.get_logger().error(f'Cartesian 경로 실행 실패: error_code={result.error_code.val}')
+        return False
+
     def spawn_attached_object(self, obj_id, mesh_msg, position, orientation_quat, link_name='base_link'):
         """position/orientation_quat(x,y,z,w)은 도구별로 다른 메쉬 원점/긴 축 방향을
         반영해 호출부(run())에서 미리 계산해 넘긴다."""
@@ -823,19 +888,13 @@ class PickYoloTarget(Node):
         if not self.move_to_joints(pregrasp_joints):
             return
 
-        # 최종 하강은 movel(직선 보간)로 처리 — MoveIt의 수직 하강 플래닝이
-        # 특이점 근처에서 잘 안 되던 문제 우회. pregrasp에서 그대로 내려가므로
-        # 자세(rx,ry,rz)는 현재 값을 유지한 채 Z만 낮춘다.
-        current_pos, _ = get_current_posx()
-        if current_pos is None:
-            self.get_logger().error('get_current_posx 실패. 기동을 취소합니다.')
-            return
-        drop_mm = (PREGRASP_Z_OFFSET - GRASP_Z_CLEARANCE) * 1000.0
-        target_pos = list(current_pos)
-        target_pos[2] -= drop_mm
-        if movel(target_pos, vel=[DESCENT_VEL_MM_S, DESCENT_VEL_MM_S],
-                 acc=[DESCENT_ACC_MM_S2, DESCENT_ACC_MM_S2], ref=DR_BASE) != 0:
-            self.get_logger().error('movel 하강 실패. 기동을 취소합니다.')
+        # 최종 하강은 Cartesian Path(직선 경로)로 처리 — pregrasp/grasp를 각각
+        # solve_ik로 따로 풀어 관절공간으로 보간하면 두 IK가 서로 다른 특이점 회피
+        # 틸트를 고를 수 있어 대각선처럼 보일 수 있었음. 자세(yaw)는 pregrasp와
+        # 동일하게 유지한 채 Z만 낮춘 직선 경로를 직접 계산/실행한다.
+        grasp_pose = self.build_pose(x, y, z + GRASP_Z_CLEARANCE, yaw)
+        if not self.move_cartesian(grasp_pose):
+            self.get_logger().error('Cartesian 하강 실패. 기동을 취소합니다.')
             return
 
         if not self.gripper_command('c'):
