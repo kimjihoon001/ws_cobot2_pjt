@@ -877,7 +877,7 @@ class JengaInspectorNode(Node):
 
     def _run_inspection_thread(self, request, response):
         """Background thread executing the Jenga inspection and scanning sequence."""
-        JReady = [-32.06, 38.09, 31.13, 0.11, 109.66, -24.86]
+        JReady = [-62.57, 2.16, 76.81, 0.00, 100.99, -62.44]
         
         # Initialize/Reset states at start of inspection
         self.hand_detected = False

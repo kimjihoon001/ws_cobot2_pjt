@@ -81,11 +81,11 @@
     </collision>
   </link>
 
-  <!-- 테이블 기준 Z=800mm 위에 천장 고정 (밑면이 Z=800mm에 오도록 오프셋 Z=0.95m 설정) -->
+  <!-- 테이블 기준 Z=900mm 위에 천장 고정 (밑면이 Z=900mm에 오도록 오프셋 Z=1.05m 설정) -->
   <joint name="table_to_ceiling" type="fixed">
     <parent link="table"/>
     <child link="ceiling"/>
-    <origin xyz="0 0 0.95" rpy="0 0 0"/>
+    <origin xyz="0 0 1.05" rpy="0 0 0"/>
   </joint>
 
   <!-- 로봇 뒤편 안전 가상 벽 정의 (배선 걸림 및 J3, J4 후방 회전 방지용) -->
