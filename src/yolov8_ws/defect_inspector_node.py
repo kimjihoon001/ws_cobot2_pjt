@@ -276,11 +276,11 @@ class YoloInferenceNode(Node):
 
     def analyze_defects(self):
         self.get_logger().info("\n=========================================")
-        self.get_logger().info("=== 젠가 타워(6층) 상태 맵 ===")
+        self.get_logger().info("=== 젠가 타워(6층) 통합 상태 맵 ===")
         self.get_logger().info("범례: [O 정상(블록)] [X 불량(누락/구멍)]")
         self.get_logger().info("-" * 55)
         
-        # 1층부터 6층까지 맵 초기화
+        # 1층부터 6층까지 각 면의 맵 초기화
         jenga_map = {
             f: {
                 -45: {"Left": "O", "Center": "O", "Right": "O"},
@@ -296,7 +296,6 @@ class YoloInferenceNode(Node):
                     key = (h["floor"], h["pos"])
                     counts[key] = counts.get(key, 0) + 1
             
-            # 5프레임 중 3번 이상 검출된 유효한 구멍만 필터링
             valid_holes = [k for k, v in counts.items() if v >= 3]
             
             for floor, pos in valid_holes:
@@ -304,21 +303,59 @@ class YoloInferenceNode(Node):
                     jenga_map[floor][yaw][pos] = "X"
                     defect_count += 1
         
-        # 6층부터 1층까지 역순으로 맵 출력 (시각적 직관성)
+        # 젠가 특성을 반영한 통합 맵 구축 (홀수층=면1, 짝수층=면2)
+        unified_pattern = []
         for f in range(6, 0, -1):
-            f1 = jenga_map[f][-45]
-            f2 = jenga_map[f][45]
+            if f % 2 != 0:
+                # 홀수층
+                face_data = jenga_map[f][-45]
+                view_str = "면1(-45도) 관측"
+            else:
+                # 짝수층
+                face_data = jenga_map[f][45]
+                view_str = "면2( 45도) 관측"
+                
+            map_str = f"{face_data['Left']} {face_data['Center']} {face_data['Right']}"
+            pattern_str = map_str.replace(" ", "")
+            unified_pattern.append(pattern_str)
             
-            map_str1 = f"{f1['Left']} {f1['Center']} {f1['Right']}"
-            map_str2 = f"{f2['Left']} {f2['Center']} {f2['Right']}"
-            
-            self.get_logger().info(f"[{f}층] 면1(-45도): {map_str1}  |  면2(45도): {map_str2}")
+            self.get_logger().info(f"[{f}층] {map_str}  ({view_str})")
             
         self.get_logger().info("-" * 55)
-        if defect_count == 0:
-            self.get_logger().info("불량품(누락된 블록)이 발견되지 않았습니다. 모두 정상입니다.")
+        
+        # 1층 -> 6층 순서로 튜플화
+        unified_pattern.reverse()
+        current_map_tuple = tuple(unified_pattern)
+        
+        # 견본 양품 템플릿 정의 (단일 타워 1층 -> 6층)
+        REFERENCE_TEMPLATES = {
+            "기본 완제품 (누락 없음)": (
+                "OOO", "OOO", "OOO", "OOO", "OOO", "OOO"
+            ),
+            "A형 상품 (3, 5층 중앙 누락)": (
+                "OOO", "OOO", "OXO", "OOO", "OOO", "OOO"
+            ),
+            "B형 상품 (짝수층 양끝 누락)": (
+                "OOO", "OOO", "OOO", "XOX", "OOO", "OOO"
+            ),
+            "C형 상품 (2층 중앙, 4층 중앙 누락)": (
+                "OOO", "OXO", "OOO", "OXO", "OOO", "OOO"
+            )
+        }
+        
+        # 패턴 매칭 및 상품 판정
+        matched_product = None
+        for product_name, template in REFERENCE_TEMPLATES.items():
+            if current_map_tuple == template:
+                matched_product = product_name
+                break
+                
+        if matched_product:
+            self.get_logger().info(f"✅ 판정 결과: 일치하는 견본을 찾았습니다! => [{matched_product}]")
         else:
-            self.get_logger().warn(f"총 {defect_count}개의 누락된 블록(구멍)이 발견되었습니다!")
+            self.get_logger().warn(f"❌ 판정 결과: 일치하는 견본이 없습니다! => [미등록 불량품]")
+            self.get_logger().warn(f"   (발견된 총 구멍 수: {defect_count}개)")
+            
         self.get_logger().info("=========================================\n")
 
     def run_inspection_sequence(self):
