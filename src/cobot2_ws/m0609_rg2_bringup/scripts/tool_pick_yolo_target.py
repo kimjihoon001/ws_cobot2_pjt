@@ -566,12 +566,13 @@ class PickYoloTarget(Node):
         co.id = obj_id
         
         pose = Pose()
-        # yaw 방향으로 9cm(메쉬 길이 18cm의 절반)만큼 뒤로 밀어서, 검출된 중심점 (x,y,z)에 스크루드라이버의 기하학적 중심이 정렬되도록 오프셋 적용
-        pose.position.x = x - 0.09 * math.cos(yaw)
-        pose.position.y = y - 0.09 * math.sin(yaw)
+        # hammer.stl은 원점이 이미 손잡이 길이 방향 중앙(generate_hammer.py 참고)이라
+        # 스크루드라이버 때와 달리 별도 위치 오프셋 없이 검출 중심점을 그대로 사용
+        pose.position.x = x
+        pose.position.y = y
         pose.position.z = z
-        
-        # 서 있는 스크루드라이버 STL 메쉬를 90도 피치 회전시켜 눕히고 yaw 적용
+
+        # 서 있는 망치 STL 메쉬를 90도 피치 회전시켜 눕히고 yaw 적용
         qx, qy, qz, qw = quat_from_rpy(0.0, math.pi / 2, yaw)
         pose.orientation.x = qx
         pose.orientation.y = qy
@@ -607,12 +608,11 @@ class PickYoloTarget(Node):
         co.id = obj_id
         
         pose = Pose()
-        # 그리퍼 팁(rg2_tcp) 기준 로컬 좌표계 오프셋 설정
-        # 18cm 스크루드라이버의 기하학적 중심이 rg2_tcp 중심에 오도록 로컬 Z축 기준 -9cm 오프셋 적용
+        # hammer.stl 원점이 이미 손잡이 길이 방향 중앙이라 rg2_tcp 원점에 그대로 맞추면 됨
         pose.position.x = 0.0
         pose.position.y = 0.0
-        pose.position.z = -0.09
-        
+        pose.position.z = 0.0
+
         # 그리퍼 팁 방향과 일치하도록 메쉬를 눕혀둠 (로컬 피치 90도)
         qx, qy, qz, qw = quat_from_rpy(0.0, math.pi / 2, 0.0)
         pose.orientation.x = qx
@@ -649,8 +649,8 @@ class PickYoloTarget(Node):
         self.get_logger().info(
             f'base_link 좌표: ({x:.3f}, {y:.3f}, {z:.3f}), yaw={math.degrees(yaw):.1f}deg')
 
-        # 해머 검출 위치에 screwdriver.stl 메쉬 스폰 (base_link에 부착된 실제 장애물 상태)
-        stl_path = '/home/rokey/ws_cobot2_pjt/src/cobot2_ws/m0609_rg2_bringup/meshes/screwdriver.stl'
+        # 해머 검출 위치에 hammer.stl 메쉬 스폰 (base_link에 부착된 실제 장애물 상태)
+        stl_path = '/home/rokey/ws_cobot2_pjt/src/cobot2_ws/m0609_rg2_bringup/meshes/hammer.stl'
         try:
             mesh_msg = load_stl_mesh(stl_path)
             self.spawn_attached_object('hammer', mesh_msg, x, y, z, yaw)
