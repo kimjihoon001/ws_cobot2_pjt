@@ -172,11 +172,11 @@
     <xacro:onrobot_rg2_transmission prefix="${prefix}"/>
     <xacro:onrobot_rg2_gazebo prefix="${prefix}"/>
 
-    <!-- 2026-07-07 두산 티칭펜던트 TCP(GripperDA_v1) 실측: effector_base 기준 회전 없이
+    <!-- 2026-07-07 두산 티칭펜던트 TCP(GripperDA_v1) 실측: base_link 기준 회전 없이
          Z축으로만 231.066mm. MoveIt이 그리퍼 손끝을 직접 목표로 잡도록 tip 링크로 노출. -->
     <joint name="${prefix}tcp_joint" type="fixed">
       <origin xyz="0 0 0.231066" rpy="0 0 0" />
-      <parent link="${effector_base}" />
+      <parent link="${prefix}base_link" />
       <child link="${prefix}tcp" />
     </joint>
     <link name="${prefix}tcp" />

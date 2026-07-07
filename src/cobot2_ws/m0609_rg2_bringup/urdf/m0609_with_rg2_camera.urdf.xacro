@@ -88,4 +88,31 @@
     <origin xyz="0 0 0.95" rpy="0 0 0"/>
   </joint>
 
+  <!-- 로봇 뒤편 안전 가상 벽 정의 (배선 걸림 및 J3, J4 후방 회전 방지용) -->
+  <link name="safety_wall">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <!-- 두께 2cm, 가로 100cm, 높이 120cm 박스 -->
+        <box size="0.02 1.0 1.2"/>
+      </geometry>
+      <material name="wall_material">
+        <color rgba="0.8 0.1 0.1 0.3"/> <!-- 반투명 빨간색으로 시각화 -->
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.02 1.0 1.2"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- base_link 기준 X = -35cm 뒤쪽, Z = 50cm 높이에 벽의 중심이 오도록 고정 -->
+  <joint name="base_to_safety_wall" type="fixed">
+    <parent link="base_link"/>
+    <child link="safety_wall"/>
+    <origin xyz="-0.35 0 0.5" rpy="0 0 0"/>
+  </joint>
+
 </robot>
