@@ -62,7 +62,7 @@
     <origin xyz="0 -0.265 0.165" rpy="0 0 0"/>
   </joint>
 
-  <!-- 가상 천장 정의 (J3 회전 범위 제한용, Z = 1000mm 이상 진입 방지) -->
+  <!-- 가상 천장 정의 (J3 회전 범위 제한용, Z = 800mm 이상 진입 방지) -->
   <link name="ceiling">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -81,11 +81,11 @@
     </collision>
   </link>
 
-  <!-- 테이블 기준 Z=1000mm 위에 천장 고정 (밑면이 Z=1000mm에 오도록 오프셋 Z=1.15m 설정) -->
+  <!-- 테이블 기준 Z=800mm 위에 천장 고정 (밑면이 Z=800mm에 오도록 오프셋 Z=0.95m 설정) -->
   <joint name="table_to_ceiling" type="fixed">
     <parent link="table"/>
     <child link="ceiling"/>
-    <origin xyz="0 0 1.15" rpy="0 0 0"/>
+    <origin xyz="0 0 0.95" rpy="0 0 0"/>
   </joint>
 
 </robot>
