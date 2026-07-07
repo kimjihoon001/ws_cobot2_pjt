@@ -589,7 +589,9 @@ class PickYoloTarget(Node):
             'rg2_left_inner_finger', 'rg2_right_inner_finger', 
             'rg2_left_inner_knuckle', 'rg2_right_inner_knuckle',
             'rg2_left_outer_knuckle', 'rg2_right_outer_knuckle',
-            'rg2_base_link'
+            'rg2_base_link',
+            'table',
+            'conveyor_belt'
         ]
         
         for _ in range(5):
@@ -629,7 +631,9 @@ class PickYoloTarget(Node):
             'rg2_left_inner_finger', 'rg2_right_inner_finger', 
             'rg2_left_inner_knuckle', 'rg2_right_inner_knuckle',
             'rg2_left_outer_knuckle', 'rg2_right_outer_knuckle',
-            'rg2_base_link'
+            'rg2_base_link',
+            'table',
+            'conveyor_belt'
         ]
         
         for _ in range(5):
