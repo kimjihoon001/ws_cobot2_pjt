@@ -205,12 +205,16 @@ class JengaInspectorNode(Node):
     def get_vertical_depth(self, u, v, Z_c, pitch_deg=45.0):
         if Z_c <= 0 or self.intrinsics is None:
             return None
-        theta = np.radians(90.0 - pitch_deg)
+        pitch = np.radians(pitch_deg)
         fx = self.intrinsics['fx']
         ppx = self.intrinsics['ppx']
+        
+        # 젠가 꼭대기가 왼쪽(u=0), 바닥이 오른쪽(u=max)인 상황: u가 커질수록 아래로 이동
         X_c = (u - ppx) * Z_c / fx
-        virtual_Y_c = -X_c
-        return Z_c * np.sin(theta) + virtual_Y_c * np.cos(theta)
+        
+        # Z_c는 카메라의 깊이, X_c는 이미지 상의 가로(실제로는 젠가의 세로) 방향
+        # pitch=0은 꼭대기에서 수직으로 내려다보는 상태
+        return Z_c * np.cos(pitch) + X_c * np.sin(pitch)
 
     def capture_single_frame(self, face_name, pitch_deg):
         self.get_logger().info(f"[{face_name}] 각도 {pitch_deg}°에서 1프레임 캡처 중...")
@@ -273,21 +277,22 @@ class JengaInspectorNode(Node):
                 if valid_entire_Z != float('inf'):
                     entire_v_depth = self.get_vertical_depth(valid_eu, valid_ev, valid_entire_Z, pitch_deg=pitch_deg)
                     if entire_v_depth is not None:
-                        theta = np.radians(90.0 - pitch_deg)
+                        pitch = np.radians(pitch_deg)
                         fx = self.intrinsics['fx']
                         ppx = self.intrinsics['ppx']
                         
-                        X_ent_c = (valid_eu - ppx) * valid_entire_Z / fx
-                        K = -np.sin(theta) * X_ent_c - np.cos(theta) * valid_entire_Z
+                        X_ent_norm = (valid_eu - ppx) / fx
+                        K_horiz = valid_entire_Z * (np.sin(pitch) - X_ent_norm * np.cos(pitch))
                         
                         for box in hole_boxes:
                             x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                             u = int((x1 + x2) / 2)
                             v = int((y1 + y2) / 2)
                             
-                            denom = -np.sin(theta) * (u - ppx) / fx - np.cos(theta)
+                            X_hole_norm = (u - ppx) / fx
+                            denom = np.sin(pitch) - X_hole_norm * np.cos(pitch)
                             if abs(denom) > 1e-6:
-                                Z_hole_true = K / denom
+                                Z_hole_true = K_horiz / denom
                                 obj_v_depth = self.get_vertical_depth(u, v, Z_hole_true, pitch_deg=pitch_deg)
                                 if obj_v_depth is not None:
                                     # 84mm 젠가 타워의 정확한 중앙(entire_v_depth)을 기준점(42mm)으로 삼아 높이 역산
