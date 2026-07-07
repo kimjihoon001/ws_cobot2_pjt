@@ -96,7 +96,7 @@ class YoloInferenceNode(Node):
         if Z_c <= 0 or self.intrinsics is None:
             return None
             
-        theta = np.radians(pitch_deg)
+        theta = np.radians(90.0 - pitch_deg)
         fx = self.intrinsics['fx']
         ppx = self.intrinsics['ppx']
         
@@ -166,18 +166,20 @@ class YoloInferenceNode(Node):
         
         pos_target = self.get_spherical_pose(target_yaw, self.current_pitch_deg, self.FIXED_DISTANCE)
         
+        old_yaw = self.current_yaw
+        self.current_yaw = target_yaw
+        
         try:
-            if self.current_yaw is None or self.current_yaw == target_yaw:
+            if old_yaw is None or old_yaw == target_yaw:
                 with self.robot_lock:
                     movel(pos_target, vel=self.VELOCITY, acc=self.ACC)
             else:
-                via_yaw = (self.current_yaw + target_yaw) / 2.0
+                via_yaw = (old_yaw + target_yaw) / 2.0
                 pos_via = self.get_spherical_pose(via_yaw, self.current_pitch_deg, self.FIXED_DISTANCE)
                 with self.robot_lock:
                     movec(pos_via, pos_target, vel=self.VELOCITY, acc=self.ACC)
                 
             mwait()
-            self.current_yaw = target_yaw
             self.get_logger().info(f"==> {name} 도착 완료.")
         except Exception as e:
             self.get_logger().error(f"이동 중 오류 발생: {e}")
@@ -211,7 +213,9 @@ def main(args=None):
                 results = node.model(node.latest_image, verbose=False)
                 annotated_frame = results[0].plot()
                 
-                if node.depth_frame is not None and node.intrinsics is not None:
+                if node.is_moving:
+                    cv2.putText(annotated_frame, "Robot is moving... Pausing depth calculation.", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                elif node.depth_frame is not None and node.intrinsics is not None:
                     try:
                         entire_box = None
                         hole_boxes = []
@@ -259,14 +263,25 @@ def main(args=None):
                                 cv2.circle(annotated_frame, (valid_eu, valid_ev), 7, (255, 0, 0), -1)
                                 # 수학적 평면 교차(Ray-Plane Intersection)를 위한 타워 전면부 평면 상수(K) 계산
                                 # 카메라 프레임에서 가상의 수직 평면 방정식: -sin(theta)*X - cos(theta)*Z = K
-                                theta = np.radians(node.current_pitch_deg)
+                                theta = np.radians(90.0 - node.current_pitch_deg)
                                 fx = node.intrinsics['fx']
                                 ppx = node.intrinsics['ppx']
                                 
                                 X_ent_c = (valid_eu - ppx) * valid_entire_Z / fx
                                 K = -np.sin(theta) * X_ent_c - np.cos(theta) * valid_entire_Z
                                 
-                                # 3. 각 'hole'들의 절대 높이 수학적 추정 및 층수 차이 계산
+                                # 1층 바닥 기준점(ex1)의 수직 깊이 계산
+                                denom_base = -np.sin(theta) * (ex1 - ppx) / fx - np.cos(theta)
+                                if abs(denom_base) > 1e-6:
+                                    Z_base_true = K / denom_base
+                                    base_v_depth = node.get_vertical_depth(ex1, ev, Z_base_true, pitch_deg=node.current_pitch_deg)
+                                else:
+                                    base_v_depth = entire_v_depth
+                                
+                                # 바닥 기준선(1층)을 시각적으로 노란색 선으로 표시
+                                cv2.line(annotated_frame, (int(ex1), int(ey1)), (int(ex1), int(ey2)), (0, 255, 255), 2)
+                                
+                                # 3. 각 'hole'들의 절대 높이 수학적 추정 및 층수 계산
                                 for idx, box in enumerate(hole_boxes):
                                     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                                     u = int((x1 + x2) / 2)
@@ -283,11 +298,15 @@ def main(args=None):
                                         obj_v_depth = None
                                         
                                     if obj_v_depth is not None:
-                                        # entire 중심 수직 깊이에서 hole 중심 수직 깊이를 뺌
-                                        relative_height = entire_v_depth - obj_v_depth
+                                        # 바닥 기준 수직 깊이에서 hole 중심 수직 깊이를 뺌 (구멍 중심의 높이)
+                                        height_from_base = base_v_depth - obj_v_depth
                                         
-                                        # 젠가 1층 높이를 약 15mm로 가정하고 상대적인 층수 차이(Floor diff) 계산
-                                        floor_diff = int(round(relative_height / 15.0))
+                                        # 구멍(Bounding Box)이 중심 기준이므로, 블록 바닥면 기준으로 보정하기 위해 절반(7.0mm)을 뺌
+                                        compensated_height = height_from_base - 7.0
+                                        
+                                        # 보정된 바닥면 높이를 기준으로 젠가 1층(14.0mm) 단위의 절대 층수 계산
+                                        # (round를 통해 가장 가까운 층으로 매핑)
+                                        floor_num = max(1, int(round(compensated_height / 14.0)) + 1)
                                         
                                         # 수평 위치(Left, Center, Right) 3등분 판별
                                         tower_width = ey2 - ey1
@@ -300,12 +319,12 @@ def main(args=None):
                                         else:
                                             horiz_pos = "Right"
                                         
-                                        # 터미널에 로그로 수평 위치, 층수 차이와 높이 출력
-                                        node.get_logger().info(f"[Hole {idx+1}] 위치: {horiz_pos} / 상대 층수: {floor_diff:+}층 / 오차: {relative_height:+.1f}mm")
+                                        # 터미널에 로그로 수평 위치, 절대 층수와 높이 출력
+                                        node.get_logger().info(f"[Hole {idx+1}] 위치: {horiz_pos} / 층수: {floor_num}층 / 바닥대비 높이: {height_from_base:.1f}mm")
                                         
                                         # 화면에 중심점(빨간색 원)과 측정된 위치, 층수 출력
                                         cv2.circle(annotated_frame, (u, v), 5, (0, 0, 255), -1)
-                                        cv2.putText(annotated_frame, f"{horiz_pos} {floor_diff:+}F", (u+10, v-10),
+                                        cv2.putText(annotated_frame, f"{horiz_pos} {floor_num}F", (u+10, v-10),
                                                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                                     else:
                                         node.get_logger().warn(f"Hole {idx+1} 중심점 주변 깊이값이 유효하지 않습니다.")
@@ -364,31 +383,37 @@ def main(args=None):
                     if node.is_manual_mode:
                         node.get_logger().warn("수동 제어를 끄고 조작해주세요.")
                     elif not node.is_moving:
-                        node.current_pitch_deg = 30.0
-                        node.get_logger().info("피치 각도를 30도로 변경했습니다.")
                         if node.current_yaw is not None:
+                            node.current_pitch_deg = 30.0
                             node.is_moving = True
+                            node.get_logger().info("피치 각도를 30도로 변경하고 이동합니다.")
                             threading.Thread(target=node.move_routine, args=(node.current_yaw, f'pitch_30_yaw_{node.current_yaw}')).start()
+                        else:
+                            node.get_logger().warn("현재 방향(Yaw)이 설정되지 않아 피치를 변경할 수 없습니다. 1, 2, 3번 키를 먼저 눌러주세요.")
                             
                 elif key == ord('5') or key in [ord('w'), ord('W')]:
                     if node.is_manual_mode:
                         node.get_logger().warn("수동 제어를 끄고 조작해주세요.")
                     elif not node.is_moving:
-                        node.current_pitch_deg = 45.0
-                        node.get_logger().info("피치 각도를 45도로 변경했습니다.")
                         if node.current_yaw is not None:
+                            node.current_pitch_deg = 45.0
                             node.is_moving = True
+                            node.get_logger().info("피치 각도를 45도로 변경하고 이동합니다.")
                             threading.Thread(target=node.move_routine, args=(node.current_yaw, f'pitch_45_yaw_{node.current_yaw}')).start()
+                        else:
+                            node.get_logger().warn("현재 방향(Yaw)이 설정되지 않아 피치를 변경할 수 없습니다. 1, 2, 3번 키를 먼저 눌러주세요.")
                             
                 elif key == ord('6') or key in [ord('e'), ord('E')]:
                     if node.is_manual_mode:
                         node.get_logger().warn("수동 제어를 끄고 조작해주세요.")
                     elif not node.is_moving:
-                        node.current_pitch_deg = 60.0
-                        node.get_logger().info("피치 각도를 60도로 변경했습니다.")
                         if node.current_yaw is not None:
+                            node.current_pitch_deg = 60.0
                             node.is_moving = True
+                            node.get_logger().info("피치 각도를 60도로 변경하고 이동합니다.")
                             threading.Thread(target=node.move_routine, args=(node.current_yaw, f'pitch_60_yaw_{node.current_yaw}')).start()
+                        else:
+                            node.get_logger().warn("현재 방향(Yaw)이 설정되지 않아 피치를 변경할 수 없습니다. 1, 2, 3번 키를 먼저 눌러주세요.")
                 
                 try:
                     result_msg = node.bridge.cv2_to_imgmsg(annotated_frame, "bgr8")
