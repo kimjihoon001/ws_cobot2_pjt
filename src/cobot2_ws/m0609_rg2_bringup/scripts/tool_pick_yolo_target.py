@@ -58,6 +58,20 @@ PREGRASP_Z_OFFSET = 0.15       # 물체 위 접근 높이 (m)
 GRASP_Z_CLEARANCE = 0.02       # 계산된 표면점보다 살짝 위에서 잡기
 CARTESIAN_MAX_STEP = 0.01      # pregrasp -> grasp 하강 Cartesian Path 보간 간격 (m)
 
+# 특이점/조인트 리밋 회피용 미세 틸트 후보 (Roll, Pitch 오프셋, 라디안). solve_ik의
+# 관절공간 IK뿐 아니라 Cartesian Path 하강에서도 동일하게 재시도할 때 사용.
+TILT_CANDIDATES = [
+    (0.0, 0.0),          # 1. 완전 수직 top-down
+    (0.0, 0.087),        # 2. Pitch +5 deg
+    (0.0, -0.087),       # 3. Pitch -5 deg
+    (0.087, 0.0),        # 4. Roll +5 deg
+    (-0.087, 0.0),       # 5. Roll -5 deg
+    (0.0, 0.174),        # 6. Pitch +10 deg
+    (0.0, -0.174),       # 7. Pitch -10 deg
+    (0.174, 0.0),        # 8. Roll +10 deg
+    (-0.174, 0.0),       # 9. Roll -10 deg
+]
+
 # 매 실행 시작 시 이동할 홈 자세(관절, degree). robot_control.py의 init_robot()에
 # 있는 범용 JReady와 동일값 (jenga_inspector.py의 JReady는 젠가 스캔 전용 포즈라 다름).
 HOME_JOINTS_DEG = [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]
@@ -575,20 +589,7 @@ class PickYoloTarget(Node):
 
     def solve_ik(self, x, y, z, yaw, seed_joints=None) -> list[float] | None:
         """주어진 x, y, z, yaw에 대해 IK를 해결. 특이점 및 joint_5 리밋 회피를 위해 미세 틸트 순회."""
-        # 틸트 오프셋 후보 (Roll, Pitch 오프셋 라디안 단위, 약 ±5도 및 ±10도)
-        tilts = [
-            (0.0, 0.0),          # 1. 완전 수직 top-down
-            (0.0, 0.087),        # 2. Pitch +5 deg
-            (0.0, -0.087),       # 3. Pitch -5 deg
-            (0.087, 0.0),        # 4. Roll +5 deg
-            (-0.087, 0.0),       # 5. Roll -5 deg
-            (0.0, 0.174),        # 6. Pitch +10 deg
-            (0.0, -0.174),       # 7. Pitch -10 deg
-            (0.174, 0.0),        # 8. Roll +10 deg
-            (-0.174, 0.0),       # 9. Roll -10 deg
-        ]
-
-        for d_roll, d_pitch in tilts:
+        for d_roll, d_pitch in TILT_CANDIDATES:
             pose = Pose()
             pose.position.x = x
             pose.position.y = y
@@ -709,9 +710,7 @@ class PickYoloTarget(Node):
         req.waypoints = [target_pose]
         req.max_step = CARTESIAN_MAX_STEP
         req.jump_threshold = 0.0
-        # TODO(임시 진단용): fraction=0.46로 막히는 게 충돌 때문인지 특이점(IK) 때문인지
-        # 구분하려고 잠깐 꺼둠. 테스트 후 True로 되돌릴 것.
-        req.avoid_collisions = False
+        req.avoid_collisions = True
 
         future = self._cartesian_cli.call_async(req)
         rclpy.spin_until_future_complete(self, future)
@@ -719,8 +718,8 @@ class PickYoloTarget(Node):
         if res is None or res.fraction < 0.99:
             fraction = res.fraction if res is not None else 0.0
             error_code = res.error_code.val if res is not None else None
-            self.get_logger().error(
-                f'Cartesian Path 계산 실패 (fraction={fraction:.2f}, error_code={error_code})')
+            self.get_logger().warn(
+                f'Cartesian Path 계산 미달 (fraction={fraction:.2f}, error_code={error_code})')
             return False
 
         if PLAN_ONLY:
@@ -743,6 +742,26 @@ class PickYoloTarget(Node):
             self.get_logger().info('Cartesian 하강 이동 완료')
             return True
         self.get_logger().error(f'Cartesian 경로 실행 실패: error_code={result.error_code.val}')
+        return False
+
+    def move_cartesian_grasp(self, x, y, z, yaw):
+        """grasp 목표까지 Cartesian Path로 하강. 실기 테스트 결과 순수 수직 경로가
+        특이점(IK) 근처에서 막히는 경우가 있어서, solve_ik와 동일한 미세 틸트
+        후보(TILT_CANDIDATES)로 재시도한다."""
+        for d_roll, d_pitch in TILT_CANDIDATES:
+            pose = Pose()
+            pose.position.x, pose.position.y, pose.position.z = x, y, z
+            qx, qy, qz, qw = quat_from_rpy(GRASP_ROLL + d_roll, GRASP_PITCH + d_pitch, yaw)
+            pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w = qx, qy, qz, qw
+
+            if self.move_cartesian(pose):
+                if d_roll != 0.0 or d_pitch != 0.0:
+                    self.get_logger().info(
+                        f'미세 틸트 적용하여 Cartesian 하강 성공: '
+                        f'Roll_offset={math.degrees(d_roll):.1f}deg, Pitch_offset={math.degrees(d_pitch):.1f}deg')
+                return True
+
+        self.get_logger().error('모든 틸트 후보에 대해 Cartesian 하강 실패')
         return False
 
     def spawn_attached_object(self, obj_id, mesh_msg, position, orientation_quat, link_name='base_link'):
@@ -894,10 +913,10 @@ class PickYoloTarget(Node):
 
         # 최종 하강은 Cartesian Path(직선 경로)로 처리 — pregrasp/grasp를 각각
         # solve_ik로 따로 풀어 관절공간으로 보간하면 두 IK가 서로 다른 특이점 회피
-        # 틸트를 고를 수 있어 대각선처럼 보일 수 있었음. 자세(yaw)는 pregrasp와
-        # 동일하게 유지한 채 Z만 낮춘 직선 경로를 직접 계산/실행한다.
-        grasp_pose = self.build_pose(x, y, z + GRASP_Z_CLEARANCE, yaw)
-        if not self.move_cartesian(grasp_pose):
+        # 틸트를 고를 수 있어 대각선처럼 보일 수 있었음. 순수 수직 경로가 특이점
+        # 근처에서 막히는 경우가 실기 테스트로 확인돼서, solve_ik처럼 미세 틸트
+        # 후보로 재시도한다.
+        if not self.move_cartesian_grasp(x, y, z + GRASP_Z_CLEARANCE, yaw):
             self.get_logger().error('Cartesian 하강 실패. 기동을 취소합니다.')
             return
 
