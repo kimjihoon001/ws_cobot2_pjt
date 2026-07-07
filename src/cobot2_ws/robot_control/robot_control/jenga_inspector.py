@@ -286,7 +286,7 @@ class JengaInspectorNode(Node):
                                 if obj_v_depth is not None:
                                     # 84mm 젠가 타워의 정확한 중앙(entire_v_depth)을 기준점(42mm)으로 삼아 높이 역산
                                     # 바운딩 박스(ex1)에 의존하지 않아 그림자 노이즈에 매우 강건함
-                                    height_from_base = 42.0 + (obj_v_depth - entire_v_depth)
+                                    height_from_base = 42.0 + (entire_v_depth - obj_v_depth)
                                     compensated_height = height_from_base - 7.0
                                     floor_num = max(1, int(round(compensated_height / 14.0)) + 1)
                                     floor_num = min(6, floor_num)
