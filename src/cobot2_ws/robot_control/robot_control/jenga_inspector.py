@@ -106,16 +106,18 @@ class JengaInspectorNode(Node):
         self.current_pitch_deg = 45.0
         
         self.REFERENCE_TEMPLATES = {
-            1: [
-                ('Left', 1), ('Center', 1),
-                ('Right', 3),
-                ('Left', 5), ('Right', 5)
-            ],
-            2: [
-                ('Right', 2),
-                ('Left', 4), ('Right', 4),
-                ('Center', 6)
-            ]
+            "기본 완제품 (누락 없음)": (
+                "OOO", "OOO", "OOO", "OOO", "OOO", "OOO"
+            ),
+            "A형 상품 (3층 중앙 누락)": (
+                "OOO", "OOO", "OXO", "OOO", "OOO", "OOO"
+            ),
+            "B형 상품 (4층 양끝 누락)": (
+                "OOO", "OOO", "OOO", "XOX", "OOO", "OOO"
+            ),
+            "C형 상품 (2층 중앙, 4층 중앙 누락)": (
+                "OOO", "OXO", "OOO", "OXO", "OOO", "OOO"
+            )
         }
 
         from rclpy.callback_groups import ReentrantCallbackGroup
@@ -332,15 +334,26 @@ class JengaInspectorNode(Node):
             print(f"  Floor {floor}:   {jenga_map[floor][0]}        {jenga_map[floor][1]}         {jenga_map[floor][2]}")
         print("===================================================\n")
         
-        product_type = "불량품 (알 수 없는 패턴)"
-        is_pass = False
+        # 1층부터 6층까지 튜플 생성
+        current_map_list = []
+        for floor in range(1, 7):
+            current_map_list.append("".join(jenga_map[floor]))
+        current_map_tuple = tuple(current_map_list)
         
-        match_type1 = (detected_features[1] == sorted(self.REFERENCE_TEMPLATES[1], key=lambda x: x[1]))
-        match_type2 = (detected_features[2] == sorted(self.REFERENCE_TEMPLATES[2], key=lambda x: x[1]))
-        
-        if match_type1 and match_type2:
-            product_type = "정상 양품 (Type A)"
+        matched_product = None
+        for product_name, template in self.REFERENCE_TEMPLATES.items():
+            if current_map_tuple == template:
+                matched_product = product_name
+                break
+                
+        if matched_product:
+            product_type = matched_product
             is_pass = True
+            self.final_matched_product = matched_product
+        else:
+            product_type = "불량품 (알 수 없는 패턴)"
+            is_pass = False
+            self.final_matched_product = "FAIL"
             
         print(f"-> 최종 판정 결과: {product_type}")
         return is_pass
@@ -1091,11 +1104,11 @@ class JengaInspectorNode(Node):
         # Format output message
         if final_result == "PASS":
             response.success = True
-            response.message = f"Jenga Inspection: PASS (Confidence: {avg_overall_confidence:.2f})"
+            response.message = f"Jenga Inspection: PASS ({getattr(self, 'final_matched_product', 'Matched')})"
         else:
             response.success = False
-            response.message = f"Jenga Inspection: FAIL. Reasons: " + " | ".join(failed_reasons)
-
+            response.message = f"Jenga Inspection: FAIL (Unknown Pattern)"
+            
         return response
 
 
