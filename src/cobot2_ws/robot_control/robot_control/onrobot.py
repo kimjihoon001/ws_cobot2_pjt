@@ -42,7 +42,7 @@ class RG():
         Please note that the value is a signed two's complement number.
         """
         result = self.client.read_holding_registers(
-            address=258, count=1, unit=65)
+            address=258, count=1, slave=65)
         offset_mm = result.registers[0] / 10.0
         return offset_mm
 
@@ -52,7 +52,7 @@ class RG():
         as it is measured between the insides of the aluminum fingers.
         """
         result = self.client.read_holding_registers(
-            address=267, count=1, unit=65)
+            address=267, count=1, slave=65)
         width_mm = result.registers[0] / 10.0
         return width_mm
 
@@ -86,7 +86,7 @@ class RG():
         # count     : number of registers to be read
         # unit      : slave device address
         result = self.client.read_holding_registers(
-            address=268, count=1, unit=65)
+            address=268, count=1, slave=65)
         status = format(result.registers[0], '016b')
         status_list = [0] * 7
         if int(status[-1]):
@@ -118,7 +118,7 @@ class RG():
         The set fingertip offset is considered.
         """
         result = self.client.read_holding_registers(
-            address=275, count=1, unit=65)
+            address=275, count=1, slave=65)
         width_mm = result.registers[0] / 10.0
         return width_mm
 
@@ -142,7 +142,7 @@ class RG():
                       with the set fingertip offset.
         """
         result = self.client.write_register(
-            address=2, value=command, unit=65)
+            address=2, value=command, slave=65)
 
     def set_target_force(self, force_val):
         """Writes the target force to be reached
@@ -151,7 +151,7 @@ class RG():
         The valid range is 0 to 400 for the RG2 and 0 to 1200 for the RG6.
         """
         result = self.client.write_register(
-            address=0, value=force_val, unit=65)
+            address=0, value=force_val, slave=65)
 
     def set_target_width(self, width_val):
         """Writes the target width between
@@ -163,25 +163,25 @@ class RG():
         as it is measured between the insides of the aluminum fingers.
         """
         result = self.client.write_register(
-            address=1, value=width_val, unit=65)
+            address=1, value=width_val, slave=65)
 
     def close_gripper(self, force_val=400):
         """Closes gripper."""
         params = [force_val, 0, 16]
         print("Start closing gripper.")
         result = self.client.write_registers(
-            address=0, values=params, unit=65)
+            address=0, values=params, slave=65)
 
     def open_gripper(self, force_val=400):
         """Opens gripper."""
         params = [force_val, self.max_width, 16]
         print("Start opening gripper.")
         result = self.client.write_registers(
-            address=0, values=params, unit=65)
+            address=0, values=params, slave=65)
 
     def move_gripper(self, width_val, force_val=400):
         """Moves gripper to the specified width."""
         params = [force_val, width_val, 16]
         print("Start moving gripper.")
         result = self.client.write_registers(
-            address=0, values=params, unit=65)
+            address=0, values=params, slave=65)
