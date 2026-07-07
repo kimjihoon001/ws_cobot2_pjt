@@ -1,5 +1,6 @@
 import math
 import struct
+import sys
 import time
 import cv2
 
@@ -27,9 +28,33 @@ import tf2_ros
 from tf2_geometry_msgs import do_transform_pose
 from onrobot_rg_msgs.srv import SetCommand
 
+# 최종 하강(grasp)은 MoveIt 대신 두산 네이티브 movel(직선 보간)로 처리 — MoveIt의
+# top-down 수직 하강 플래닝이 특이점 근처에서 잘 안 되던 문제를 우회하기 위함.
+# pregrasp까지는 그대로 MoveIt(관절공간)으로 이동. jenga_inspector.py와 동일한
+# DR_init 초기화 패턴(임포트 전에 노드부터 만들어야 함).
+ROBOT_ID = 'dsr01'
+ROBOT_MODEL = 'm0609'
+
+import DR_init
+DR_init.__dsr__id = ROBOT_ID
+DR_init.__dsr__model = ROBOT_MODEL
+
+if not rclpy.ok():
+    rclpy.init()
+
+_dsr_node = rclpy.create_node('tool_pick_yolo_target_dsr_node', namespace=ROBOT_ID)
+DR_init.__dsr__node = _dsr_node
+
+try:
+    from DSR_ROBOT2 import movel, get_current_posx, DR_BASE
+except ImportError as e:
+    print(f'DSR_ROBOT2 임포트 실패: {e}')
+    sys.exit()
+
 MODEL_PATH = '/home/rokey/ws_cobot2_pjt/src/cobot2_ws/voice_processing/resource/toolbest.pt'
 CLASS_NAMES = {0: 'screw2', 1: 'tool-hammer'}
-TARGET_CLASS = 'tool-hammer'   # 잡을 대상. 나사면 'screw2'로 변경
+# 단일 고정 타겟 대신, 화면에 보이는 것 중(KEYPOINT_AXIS_ROLE에 등록된 클래스면
+# 전부 후보) 컨피던스가 가장 높은 것을 골라서 잡는다.
 CONFIDENCE_THRESHOLD = 0.7
 DETECT_TIMEOUT_SEC = 15.0
 MIN_DEPTH_M = 0.1
@@ -44,6 +69,12 @@ EEF_LINK = 'rg2_tcp'
 SPEED_SCALE = 0.1              # 낮을수록 천천히 (가상모드라도 우선 저속 유지)
 PREGRASP_Z_OFFSET = 0.15       # 물체 위 접근 높이 (m)
 GRASP_Z_CLEARANCE = 0.02       # 계산된 표면점보다 살짝 위에서 잡기
+DESCENT_VEL_MM_S = 30.0        # pregrasp -> grasp 최종 하강(movel) 속도 (mm/s)
+DESCENT_ACC_MM_S2 = 30.0       # 위와 동일한 movel 가속도 (mm/s^2)
+
+# 매 실행 시작 시 이동할 홈 자세(관절, degree). robot_control.py의 init_robot()에
+# 있는 범용 JReady와 동일값 (jenga_inspector.py의 JReady는 젠가 스캔 전용 포즈라 다름).
+HOME_JOINTS_DEG = [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]
 
 # move_group만 단독 실행(moveit_camera.launch.py)할 때는 controller_manager가
 # 없어 실제 Execute/그리퍼 서비스가 불가하므로 기본값 True/False.
@@ -297,7 +328,7 @@ class PickYoloTarget(Node):
         ):
             x1, y1, x2, y2 = map(int, box_xyxy)
             class_name = CLASS_NAMES.get(int(label), f'class_{int(label)}')
-            is_target = (best is not None and class_name == TARGET_CLASS and score >= CONFIDENCE_THRESHOLD)
+            is_target = (best is not None and class_name in KEYPOINT_AXIS_ROLE and score >= CONFIDENCE_THRESHOLD)
             color = (0, 255, 0) if is_target else (128, 128, 128)  # 타겟=녹색, 기타=회색
             thickness = 3 if is_target else 1
             cv2.rectangle(vis, (x1, y1), (x2, y2), color, thickness)
@@ -305,10 +336,10 @@ class PickYoloTarget(Node):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, thickness)
         # 타겟 키포인트 그리기
         if best is not None:
-            _, (bx1, by1, bx2, by2), bidx = best
+            _, (bx1, by1, bx2, by2), bidx, best_class = best
             cx, cy = int((bx1 + bx2) / 2), int((by1 + by2) / 2)
             cv2.circle(vis, (cx, cy), 8, (0, 0, 255), -1)  # 중심점 빨간 원
-            role = KEYPOINT_AXIS_ROLE[TARGET_CLASS]
+            role = KEYPOINT_AXIS_ROLE[best_class]
             kpts_xy = results.keypoints.xy[bidx].tolist()
             for kidx, kpt in enumerate(kpts_xy):
                 kx, ky = int(kpt[0]), int(kpt[1])
@@ -322,7 +353,8 @@ class PickYoloTarget(Node):
             cv2.line(vis, (int(head_px[0]), int(head_px[1])),
                      (int(tail_px[0]), int(tail_px[1])), (0, 255, 255), 2)
         # 임계값 표시
-        cv2.putText(vis, f'Threshold: {CONFIDENCE_THRESHOLD:.0%}  Target: {TARGET_CLASS}',
+        targets_label = '/'.join(KEYPOINT_AXIS_ROLE.keys())
+        cv2.putText(vis, f'Threshold: {CONFIDENCE_THRESHOLD:.0%}  Target: {targets_label}',
                     (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         # ROS 토픽으로 발행 (rqt_image_view에서 /yolo_detection/image 구독)
         # cv_bridge + OpenCV5 호환 문제 우회: Image 메시지 직접 생성
@@ -337,7 +369,8 @@ class PickYoloTarget(Node):
         self._vis_pub.publish(msg)
 
     def detect_once(self, timeout_sec=DETECT_TIMEOUT_SEC):
-        """color/depth/intrinsics가 갖춰지면 TARGET_CLASS 중 최고 confidence 탐지 1건을 반환."""
+        """color/depth/intrinsics가 갖춰지면, 화면에 보이는 픽업 대상(KEYPOINT_AXIS_ROLE에
+        등록된 클래스) 중 최고 confidence 탐지 1건을 클래스 구분 없이 반환."""
         deadline = time.monotonic() + timeout_sec
         while rclpy.ok() and time.monotonic() < deadline:
             rclpy.spin_once(self, timeout_sec=0.1)
@@ -352,10 +385,10 @@ class PickYoloTarget(Node):
                 if score < CONFIDENCE_THRESHOLD:
                     continue
                 class_name = CLASS_NAMES.get(int(label), f'class_{int(label)}')
-                if class_name != TARGET_CLASS:
+                if class_name not in KEYPOINT_AXIS_ROLE:
                     continue
                 if best is None or score > best[0]:
-                    best = (score, box_xyxy, idx)
+                    best = (score, box_xyxy, idx, class_name)
 
             # 시각화 (탐지 여부와 무관하게 매 프레임 갱신)
             self._visualize(self.color_frame, results, best)
@@ -363,19 +396,19 @@ class PickYoloTarget(Node):
             if best is None:
                 continue
 
-            score, (x1, y1, x2, y2), idx = best
+            score, (x1, y1, x2, y2), idx, class_name = best
             cx_px, cy_px = int((x1 + x2) / 2), int((y1 + y2) / 2)
             depth_m = self._sample_depth(cx_px, cy_px)
             if depth_m is None:
                 continue
 
-            role = KEYPOINT_AXIS_ROLE[TARGET_CLASS]
+            role = KEYPOINT_AXIS_ROLE[class_name]
             kpts_xy = results.keypoints.xy[idx].tolist()
             head_px = np.mean([kpts_xy[j] for j in role['head_idx']], axis=0)
             tail_px = np.array(kpts_xy[role['tail_idx']])
 
-            self.get_logger().info(f'{TARGET_CLASS} 탐지 (conf={score:.2f}, depth={depth_m:.3f}m)')
-            return cx_px, cy_px, depth_m, head_px, tail_px
+            self.get_logger().info(f'{class_name} 탐지 (conf={score:.2f}, depth={depth_m:.3f}m)')
+            return cx_px, cy_px, depth_m, head_px, tail_px, class_name
 
         return None
 
@@ -724,13 +757,17 @@ class PickYoloTarget(Node):
             time.sleep(0.1)
         self.get_logger().info(f"물체 '{obj_id}' 그리퍼에 부착 완료")
     def run(self):
-        self.get_logger().info(f'{TARGET_CLASS} 탐지 대기중...')
+        self.get_logger().info('홈 자세로 이동 중...')
+        self.move_to_joints([math.radians(d) for d in HOME_JOINTS_DEG])
+
+        targets_label = '/'.join(KEYPOINT_AXIS_ROLE.keys())
+        self.get_logger().info(f'{targets_label} 탐지 대기중...')
         detection = self.detect_once()
         if detection is None:
             self.get_logger().error('타겟을 찾지 못함 (타임아웃)')
             return
 
-        cx, cy, depth_m, head_px, tail_px = detection
+        cx, cy, depth_m, head_px, tail_px, detected_class = detection
         x, y, z = self.pixel_to_base_xyz(cx, cy, depth_m)
         axis_angle, yaw = self.axis_yaw(head_px, tail_px)
         self.get_logger().info(
@@ -747,7 +784,7 @@ class PickYoloTarget(Node):
         # - screwdriver.stl: 실측 스캔(mm 단위라 0.001 스케일 필요), 원점이 팁(한쪽 끝),
         #   긴 축이 Y, 길이 중심은 원점에서 -0.08m. 원형 단면이라 회전축 선택에 hammer
         #   같은 제약은 없어서 요(Z축)만으로 충분.
-        if TARGET_CLASS == 'tool-hammer':
+        if detected_class == 'tool-hammer':
             stl_path = '/home/rokey/ws_cobot2_pjt/src/cobot2_ws/m0609_rg2_bringup/meshes/hammer.stl'
             mesh_scale = 1.0
             obj_id = 'hammer'
@@ -755,7 +792,7 @@ class PickYoloTarget(Node):
                 flatten_roll=math.pi / 2, flatten_pitch=0.0, world_yaw_offset=math.pi / 2,
                 native_offset=(0.0, 0.0, 0.0), axis_angle=axis_angle, yaw=yaw,
                 detected_xyz=(x, y, z))
-        elif TARGET_CLASS == 'screw2':
+        elif detected_class == 'screw2':
             stl_path = '/home/rokey/ws_cobot2_pjt/src/cobot2_ws/m0609_rg2_bringup/meshes/screwdriver.stl'
             mesh_scale = 0.001
             obj_id = 'screwdriver'
@@ -764,34 +801,43 @@ class PickYoloTarget(Node):
                 native_offset=(0.0, -0.08, 0.0), axis_angle=axis_angle, yaw=yaw,
                 detected_xyz=(x, y, z))
         else:
-            self.get_logger().error(f'미지원 TARGET_CLASS: {TARGET_CLASS}')
+            self.get_logger().error(f'미지원 detected_class: {detected_class}')
             return
 
         mesh_msg = None
         try:
             mesh_msg = load_stl_mesh(stl_path, scale=mesh_scale)
             self.spawn_attached_object(obj_id, mesh_msg, world_position, world_quat)
-            self.get_logger().info(f'{TARGET_CLASS} 검출 위치에 {obj_id} STL 스폰 완료')
+            self.get_logger().info(f'{detected_class} 검출 위치에 {obj_id} STL 스폰 완료')
         except Exception as e:
             self.get_logger().error(f'STL 스폰 실패: {e}')
 
-        pregrasp = self.build_pose(x, y, z + PREGRASP_Z_OFFSET, yaw)
-        grasp = self.build_pose(x, y, z + GRASP_Z_CLEARANCE, yaw)
-
-        # 관절 공간 제어(Joint Space Control)를 위한 IK 풀이
+        # pregrasp까지는 MoveIt 관절공간 이동(특이점 회피용 틸트 후보 탐색 포함).
         pregrasp_joints = self.solve_ik(x, y, z + PREGRASP_Z_OFFSET, yaw)
-        grasp_joints = self.solve_ik(x, y, z + GRASP_Z_CLEARANCE, yaw, seed_joints=pregrasp_joints)
- 
-        if pregrasp_joints is None or grasp_joints is None:
-            self.get_logger().error('pregrasp 또는 grasp 포즈에 대한 IK 해를 찾지 못했습니다. 기동을 취소합니다.')
+        if pregrasp_joints is None:
+            self.get_logger().error('pregrasp 포즈에 대한 IK 해를 찾지 못했습니다. 기동을 취소합니다.')
             return
 
         if not self.gripper_command('o'):
             return
         if not self.move_to_joints(pregrasp_joints):
             return
-        if not self.move_to_joints(grasp_joints):
+
+        # 최종 하강은 movel(직선 보간)로 처리 — MoveIt의 수직 하강 플래닝이
+        # 특이점 근처에서 잘 안 되던 문제 우회. pregrasp에서 그대로 내려가므로
+        # 자세(rx,ry,rz)는 현재 값을 유지한 채 Z만 낮춘다.
+        current_pos, _ = get_current_posx()
+        if current_pos is None:
+            self.get_logger().error('get_current_posx 실패. 기동을 취소합니다.')
             return
+        drop_mm = (PREGRASP_Z_OFFSET - GRASP_Z_CLEARANCE) * 1000.0
+        target_pos = list(current_pos)
+        target_pos[2] -= drop_mm
+        if movel(target_pos, vel=[DESCENT_VEL_MM_S, DESCENT_VEL_MM_S],
+                 acc=[DESCENT_ACC_MM_S2, DESCENT_ACC_MM_S2], ref=DR_BASE) != 0:
+            self.get_logger().error('movel 하강 실패. 기동을 취소합니다.')
+            return
+
         if not self.gripper_command('c'):
             return
         # 그리퍼를 닫은 후, 월드(base_link)에 있던 장애물을 그리퍼 프레임으로 리어태치
@@ -802,7 +848,8 @@ class PickYoloTarget(Node):
 
 
 def main():
-    rclpy.init()
+    if not rclpy.ok():
+        rclpy.init()
     node = PickYoloTarget()
     try:
         node.run()
