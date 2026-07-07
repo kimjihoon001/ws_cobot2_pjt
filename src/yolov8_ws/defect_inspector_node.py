@@ -30,7 +30,7 @@ class YoloInferenceNode(Node):
         super().__init__('defect_inspector_node')
         
         # YOLOv8 ONNX 모델 로드
-        model_path = '/home/rokey/cobot_ws/src/ws_cobot2_pjt/src/yolov8_ws/model/best_2.onnx'
+        model_path = '/home/rokey/cobot_ws/src/ws_cobot2_pjt/src/yolov8_ws/model/best_3.onnx'
         if not os.path.exists(model_path):
             model_path = '/home/rokey/cobot_ws/src/ws_cobot2_pjt/src/yolov8_ws/model/best_2.onnx' # fallback
             
@@ -332,10 +332,10 @@ class YoloInferenceNode(Node):
             "기본 완제품 (누락 없음)": (
                 "OOO", "OOO", "OOO", "OOO", "OOO", "OOO"
             ),
-            "A형 상품 (3, 5층 중앙 누락)": (
+            "A형 상품 (3층 중앙 누락)": (
                 "OOO", "OOO", "OXO", "OOO", "OOO", "OOO"
             ),
-            "B형 상품 (짝수층 양끝 누락)": (
+            "B형 상품 (4층 양끝 누락)": (
                 "OOO", "OOO", "OOO", "XOX", "OOO", "OOO"
             ),
             "C형 상품 (2층 중앙, 4층 중앙 누락)": (
