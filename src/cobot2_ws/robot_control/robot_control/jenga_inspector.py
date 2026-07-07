@@ -274,13 +274,6 @@ class JengaInspectorNode(Node):
                         X_ent_c = (valid_eu - ppx) * valid_entire_Z / fx
                         K = -np.sin(theta) * X_ent_c - np.cos(theta) * valid_entire_Z
                         
-                        denom_base = -np.sin(theta) * (ex1 - ppx) / fx - np.cos(theta)
-                        if abs(denom_base) > 1e-6:
-                            Z_base_true = K / denom_base
-                            base_v_depth = self.get_vertical_depth(ex1, ev, Z_base_true, pitch_deg=pitch_deg)
-                        else:
-                            base_v_depth = entire_v_depth
-                        
                         for box in hole_boxes:
                             x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                             u = int((x1 + x2) / 2)
@@ -291,9 +284,12 @@ class JengaInspectorNode(Node):
                                 Z_hole_true = K / denom
                                 obj_v_depth = self.get_vertical_depth(u, v, Z_hole_true, pitch_deg=pitch_deg)
                                 if obj_v_depth is not None:
-                                    height_from_base = base_v_depth - obj_v_depth
+                                    # 84mm 젠가 타워의 정확한 중앙(entire_v_depth)을 기준점(42mm)으로 삼아 높이 역산
+                                    # 바운딩 박스(ex1)에 의존하지 않아 그림자 노이즈에 매우 강건함
+                                    height_from_base = 42.0 + (obj_v_depth - entire_v_depth)
                                     compensated_height = height_from_base - 7.0
                                     floor_num = max(1, int(round(compensated_height / 14.0)) + 1)
+                                    floor_num = min(6, floor_num)
                                     
                                     tower_width = ey2 - ey1
                                     third = tower_width / 3.0
@@ -1048,6 +1044,7 @@ class JengaInspectorNode(Node):
 
         # 모든 캡처 종료 후 다중 각도 필터링 수행
         from collections import Counter
+        pos_mirror = {"Left": "Right", "Center": "Center", "Right": "Left"}
         for f_idx in face_results_buffer:
             face_name_str = face_names[f_idx]
             counter = Counter(face_results_buffer[f_idx])
@@ -1056,10 +1053,15 @@ class JengaInspectorNode(Node):
             final_holes = [hole for hole, count in counter.items() if count >= 2]
             self.get_logger().info(f"[{face_name_str}] 면 다중 각도 종합 필터링된 최종 구멍: {final_holes}")
             
+            # Left, Front 면이 스캔되었을 경우 6층 맵 매칭을 위해 Right, Back 면 시점으로 좌우 반전(Mirror) 정규화
             if f_idx == 1:
                 self.inspection_data[1] = final_holes
+            elif f_idx == 3: # Left
+                self.inspection_data[1] = [(f, pos_mirror.get(p, p)) for f, p in final_holes]
             elif f_idx == 2:
                 self.inspection_data[2] = final_holes
+            elif f_idx == 0: # Front
+                self.inspection_data[2] = [(f, pos_mirror.get(p, p)) for f, p in final_holes]
 
         # 5. Analyze defects (Build 6-floor map and match patterns)
         failed_reasons = []
