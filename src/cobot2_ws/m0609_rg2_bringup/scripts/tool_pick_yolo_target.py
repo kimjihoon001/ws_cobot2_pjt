@@ -587,9 +587,11 @@ class PickYoloTarget(Node):
             self.get_logger().error(f'그리퍼 명령 실패: {command!r}')
         return res is not None and res.success
 
-    def solve_ik(self, x, y, z, yaw, seed_joints=None) -> list[float] | None:
-        """주어진 x, y, z, yaw에 대해 IK를 해결. 특이점 및 joint_5 리밋 회피를 위해 미세 틸트 순회."""
-        for d_roll, d_pitch in TILT_CANDIDATES:
+    def solve_ik(self, x, y, z, yaw, seed_joints=None, tilts=TILT_CANDIDATES) -> list[float] | None:
+        """주어진 x, y, z, yaw에 대해 IK를 해결. 특이점 및 joint_5 리밋 회피를 위해 미세 틸트 순회.
+        grasp처럼 최종 자세가 틀어지면 안 되는 곳에서는 tilts=[(0.0, 0.0)]로 순수
+        수직만 시도하도록 제한할 수 있다."""
+        for d_roll, d_pitch in tilts:
             pose = Pose()
             pose.position.x = x
             pose.position.y = y
@@ -744,25 +746,24 @@ class PickYoloTarget(Node):
         self.get_logger().error(f'Cartesian 경로 실행 실패: error_code={result.error_code.val}')
         return False
 
-    def move_cartesian_grasp(self, x, y, z, yaw):
-        """grasp 목표까지 Cartesian Path로 하강. 실기 테스트 결과 순수 수직 경로가
-        특이점(IK) 근처에서 막히는 경우가 있어서, solve_ik와 동일한 미세 틸트
-        후보(TILT_CANDIDATES)로 재시도한다."""
-        for d_roll, d_pitch in TILT_CANDIDATES:
-            pose = Pose()
-            pose.position.x, pose.position.y, pose.position.z = x, y, z
-            qx, qy, qz, qw = quat_from_rpy(GRASP_ROLL + d_roll, GRASP_PITCH + d_pitch, yaw)
-            pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w = qx, qy, qz, qw
+    def move_cartesian_grasp(self, x, y, z, yaw, seed_joints=None):
+        """grasp 목표까지 가능하면 Cartesian Path(순수 수직)로 직선 하강.
+        실기 테스트 결과 순수 수직 경로가 특이점(IK) 근처에서 막히는 경우가 있었는데,
+        틸트로 재시도하면 경로는 살아도 grasp 순간 자세가 틀어져서(최대 10도) 실제
+        파지 위치가 어긋나 놓치는 문제가 있었음(부착 성공 로그는 그리퍼가 닫혔다는
+        뜻일 뿐 실제로 물체를 물었는지는 보장 안 함). 그래서 틸트 대신 관절공간
+        IK(자세는 순수 수직 그대로 고정)로 폴백 — 경로가 완전한 직선은 아닐 수
+        있어도 최종 자세/위치 정확도는 유지한다."""
+        grasp_pose = self.build_pose(x, y, z, yaw)
+        if self.move_cartesian(grasp_pose):
+            return True
 
-            if self.move_cartesian(pose):
-                if d_roll != 0.0 or d_pitch != 0.0:
-                    self.get_logger().info(
-                        f'미세 틸트 적용하여 Cartesian 하강 성공: '
-                        f'Roll_offset={math.degrees(d_roll):.1f}deg, Pitch_offset={math.degrees(d_pitch):.1f}deg')
-                return True
-
-        self.get_logger().error('모든 틸트 후보에 대해 Cartesian 하강 실패')
-        return False
+        self.get_logger().warn('직선 Cartesian 하강 실패 — 파지 정확도 유지를 위해 관절공간 IK로 폴백')
+        grasp_joints = self.solve_ik(x, y, z, yaw, seed_joints=seed_joints, tilts=[(0.0, 0.0)])
+        if grasp_joints is None:
+            self.get_logger().error('grasp 포즈(순수 수직)에 대한 IK 해를 찾지 못했습니다.')
+            return False
+        return self.move_to_joints(grasp_joints)
 
     def spawn_attached_object(self, obj_id, mesh_msg, position, orientation_quat, link_name='base_link'):
         """position/orientation_quat(x,y,z,w)은 도구별로 다른 메쉬 원점/긴 축 방향을
@@ -911,12 +912,10 @@ class PickYoloTarget(Node):
         if not self.move_to_joints(pregrasp_joints):
             return
 
-        # 최종 하강은 Cartesian Path(직선 경로)로 처리 — pregrasp/grasp를 각각
-        # solve_ik로 따로 풀어 관절공간으로 보간하면 두 IK가 서로 다른 특이점 회피
-        # 틸트를 고를 수 있어 대각선처럼 보일 수 있었음. 순수 수직 경로가 특이점
-        # 근처에서 막히는 경우가 실기 테스트로 확인돼서, solve_ik처럼 미세 틸트
-        # 후보로 재시도한다.
-        if not self.move_cartesian_grasp(x, y, z + GRASP_Z_CLEARANCE, yaw):
+        # 최종 하강: move_cartesian_grasp()가 순수 수직 Cartesian 직선 하강을 우선
+        # 시도하고, 특이점 때문에 안 되면 자세는 그대로(수직) 유지한 채 관절공간
+        # IK로 폴백한다 (자세하강 참고: move_cartesian_grasp 문서 주석).
+        if not self.move_cartesian_grasp(x, y, z + GRASP_Z_CLEARANCE, yaw, seed_joints=pregrasp_joints):
             self.get_logger().error('Cartesian 하강 실패. 기동을 취소합니다.')
             return
 
