@@ -33,11 +33,10 @@ MAX_DEPTH_M = 3.0
 
 PLANNING_FRAME = 'base_link'
 GROUP_NAME = 'manipulator'
-EEF_LINK = 'tool0'
-# ※ movegroup_only.launch.py 기준: manipulator 그룹 tip_link = tool0 (m0609_rg2.srdf)
-# TODO: 목표 pose는 지금 tool0(플랜지) 기준으로 계산됨 — 그리퍼 TCP 오프셋만큼 오차 있음.
-# 두산 로봇 연결 후 get_current_tcp/get_tool 서비스로 실제 TCP/tool weight 값을 받아와
-# EEF_LINK를 TCP 프레임으로 바꾸거나 목표 pose를 오프셋 보정할 것.
+EEF_LINK = 'rg2_tcp'
+# ※ manipulator 그룹 tip_link = rg2_tcp (m0609_rg2.srdf). TCP 오프셋(tool0 기준
+# 회전 없이 Z 231.066mm, 2026-07-07 두산 티칭펜던트 실측)은 onrobot_rg2_model_macro.xacro의
+# fixed joint로 URDF에 반영되어 있어, MoveIt이 그리퍼 손끝을 직접 목표로 잡는다.
 SPEED_SCALE = 0.1              # 낮을수록 천천히 (가상모드라도 우선 저속 유지)
 PREGRASP_Z_OFFSET = 0.15       # 물체 위 접근 높이 (m)
 GRASP_Z_CLEARANCE = 0.02       # 계산된 표면점보다 살짝 위에서 잡기
@@ -77,6 +76,12 @@ class PickYoloTarget(Node):
     def __init__(self):
         super().__init__('pick_yolo_target')
         self.bridge = CvBridge()
+
+        # Tool weight(CamWeight, 2026-07-07 펜던트 실측 0.420kg) — 등록된 Tool weight
+        # 값 자체를 돌려주는 서비스가 없어(get_workpiece_weight는 Tool 설정 이후 "추가로"
+        # 든 무게만 측정) 로봇에서 조회 불가. 참고/로깅용 파라미터로만 유지.
+        self.declare_parameter('tool_weight_kg', 0.420)
+        self.tool_weight_kg = self.get_parameter('tool_weight_kg').get_parameter_value().double_value
 
         self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
         self.get_logger().info(f'YOLO device: {self.device}')
