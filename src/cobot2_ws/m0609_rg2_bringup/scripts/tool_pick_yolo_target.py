@@ -709,7 +709,9 @@ class PickYoloTarget(Node):
         req.waypoints = [target_pose]
         req.max_step = CARTESIAN_MAX_STEP
         req.jump_threshold = 0.0
-        req.avoid_collisions = True
+        # TODO(임시 진단용): fraction=0.46로 막히는 게 충돌 때문인지 특이점(IK) 때문인지
+        # 구분하려고 잠깐 꺼둠. 테스트 후 True로 되돌릴 것.
+        req.avoid_collisions = False
 
         future = self._cartesian_cli.call_async(req)
         rclpy.spin_until_future_complete(self, future)
