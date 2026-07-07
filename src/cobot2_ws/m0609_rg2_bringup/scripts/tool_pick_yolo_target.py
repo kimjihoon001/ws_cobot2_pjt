@@ -75,6 +75,71 @@ def quat_from_rpy(roll, pitch, yaw):
     )
 
 
+def rot_matrix_from_rpy(roll, pitch, yaw):
+    """quat_from_rpy와 동일한 축 규약(R = Rz(yaw)*Ry(pitch)*Rx(roll))의 3x3 행렬."""
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
+    ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
+    rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
+    return rz @ ry @ rx
+
+
+def compute_attach_pose(flatten_roll, flatten_pitch, world_yaw_offset, native_offset,
+                         axis_angle, yaw, detected_xyz):
+    """메쉬를 눕히는 고정 회전(flatten_roll/pitch)과 물체 실제 방향(axis_angle)으로 world
+    자세를 구성하고, native_offset(메쉬 원점 기준 "길이 중심" 등 정렬 기준점, 원점이
+    이미 중심이면 (0,0,0))이 검출 좌표(detected_xyz)/그리퍼 원점에 오도록 위치까지
+    함께 계산한다. 그리퍼 부착용 자세는 world 자세를 tcp의 실제 world 회전(GRASP_ROLL/
+    PITCH, grasp용 yaw)으로 역회전시켜 tcp 로컬 기준으로 구한다.
+    각도 하나만으로 긴 축만 맞추면 그 축에서 벗어난 부분(예: 해머 머리)이 반대로
+    뒤집힐 수 있어서, 회전행렬 전체로 위치/자세를 함께 유도한다."""
+    world_yaw = axis_angle + world_yaw_offset
+    r_world = rot_matrix_from_rpy(flatten_roll, flatten_pitch, world_yaw)
+    r_tcp = rot_matrix_from_rpy(GRASP_ROLL, GRASP_PITCH, yaw)
+    r_local = r_tcp.T @ r_world
+
+    offset = np.array(native_offset)
+    world_position = tuple(np.array(detected_xyz) - r_world @ offset)
+    gripper_position = tuple(-(r_local @ offset))
+
+    world_quat = quat_from_matrix(r_world)
+    gripper_quat = quat_from_matrix(r_local)
+    return world_position, world_quat, gripper_position, gripper_quat
+
+
+def quat_from_matrix(r):
+    """3x3 회전행렬 -> 쿼터니언(x,y,z,w). 단일 회전각(roll/pitch/yaw 중 하나)만으로는
+    표현 안 되는 임의 회전(예: 두 좌표계 사이의 상대 회전)을 넘길 때 사용."""
+    trace = r[0, 0] + r[1, 1] + r[2, 2]
+    if trace > 0:
+        s = 0.5 / math.sqrt(trace + 1.0)
+        qw = 0.25 / s
+        qx = (r[2, 1] - r[1, 2]) * s
+        qy = (r[0, 2] - r[2, 0]) * s
+        qz = (r[1, 0] - r[0, 1]) * s
+    elif r[0, 0] > r[1, 1] and r[0, 0] > r[2, 2]:
+        s = 2.0 * math.sqrt(1.0 + r[0, 0] - r[1, 1] - r[2, 2])
+        qw = (r[2, 1] - r[1, 2]) / s
+        qx = 0.25 * s
+        qy = (r[0, 1] + r[1, 0]) / s
+        qz = (r[0, 2] + r[2, 0]) / s
+    elif r[1, 1] > r[2, 2]:
+        s = 2.0 * math.sqrt(1.0 + r[1, 1] - r[0, 0] - r[2, 2])
+        qw = (r[0, 2] - r[2, 0]) / s
+        qx = (r[0, 1] + r[1, 0]) / s
+        qy = 0.25 * s
+        qz = (r[1, 2] + r[2, 1]) / s
+    else:
+        s = 2.0 * math.sqrt(1.0 + r[2, 2] - r[0, 0] - r[1, 1])
+        qw = (r[1, 0] - r[0, 1]) / s
+        qx = (r[0, 2] + r[2, 0]) / s
+        qy = (r[1, 2] + r[2, 1]) / s
+        qz = 0.25 * s
+    return qx, qy, qz, qw
+
+
 def _add_vertex(mesh, vertices_map, current_triangle, x, y, z, scale):
     pt_key = (round(x * scale, 6), round(y * scale, 6), round(z * scale, 6))
     if pt_key not in vertices_map:
@@ -578,9 +643,9 @@ class PickYoloTarget(Node):
         self.get_logger().error(f'실패: error_code={result.error_code.val}')
         return False
 
-    def spawn_attached_object(self, obj_id, mesh_msg, position, orientation_rpy, link_name='base_link'):
-        """position/orientation_rpy는 도구별로 다른 메쉬 원점/긴 축 방향을 반영해
-        호출부(run())에서 미리 계산해 넘긴다."""
+    def spawn_attached_object(self, obj_id, mesh_msg, position, orientation_quat, link_name='base_link'):
+        """position/orientation_quat(x,y,z,w)은 도구별로 다른 메쉬 원점/긴 축 방향을
+        반영해 호출부(run())에서 미리 계산해 넘긴다."""
         from moveit_msgs.msg import AttachedCollisionObject, CollisionObject
 
         aco = AttachedCollisionObject()
@@ -593,7 +658,7 @@ class PickYoloTarget(Node):
         pose = Pose()
         pose.position.x, pose.position.y, pose.position.z = position
 
-        qx, qy, qz, qw = quat_from_rpy(*orientation_rpy)
+        qx, qy, qz, qw = orientation_quat
         pose.orientation.x = qx
         pose.orientation.y = qy
         pose.orientation.z = qz
@@ -619,9 +684,9 @@ class PickYoloTarget(Node):
             time.sleep(0.1)
         self.get_logger().info(f"물체 '{obj_id}'가 '{link_name}'에 부착된 상태(실제 장애물 판정)로 스폰되었습니다.")
 
-    def attach_object_to_gripper(self, obj_id, mesh_msg, position, orientation_rpy):
-        """position/orientation_rpy는 도구별로 다른 메쉬 원점/긴 축 방향을 반영해
-        호출부(run())에서 미리 계산해 넘긴다 (rg2_tcp 기준 로컬 좌표)."""
+    def attach_object_to_gripper(self, obj_id, mesh_msg, position, orientation_quat):
+        """position/orientation_quat(x,y,z,w)은 도구별로 다른 메쉬 원점/긴 축 방향을
+        반영해 호출부(run())에서 미리 계산해 넘긴다 (rg2_tcp 기준 로컬 좌표)."""
         from moveit_msgs.msg import AttachedCollisionObject, CollisionObject
 
         aco = AttachedCollisionObject()
@@ -634,7 +699,7 @@ class PickYoloTarget(Node):
         pose = Pose()
         pose.position.x, pose.position.y, pose.position.z = position
 
-        qx, qy, qz, qw = quat_from_rpy(*orientation_rpy)
+        qx, qy, qz, qw = orientation_quat
         pose.orientation.x = qx
         pose.orientation.y = qy
         pose.orientation.z = qz
@@ -672,36 +737,32 @@ class PickYoloTarget(Node):
             f'base_link 좌표: ({x:.3f}, {y:.3f}, {z:.3f}), '
             f'axis_angle={math.degrees(axis_angle):.1f}deg, yaw={math.degrees(yaw):.1f}deg')
 
-        # 도구별 메쉬 파일/스케일/부착 자세 계산.
-        # 메쉬 방향은 머리/꼬리가 있는 비대칭 형상이므로 grasp용 yaw(joint_6 근접을 위해
-        # 180도씩 뒤집힐 수 있음)가 아니라 실제 물체 방향인 axis_angle을 기준으로 계산.
-        # - hammer.stl: 원점이 손잡이 길이 방향 중앙, 긴 축이 Z(서 있는 형태) -> 피치 90도로 눕힘.
+        # 도구별 메쉬 파일/스케일/부착 자세 계산 (compute_attach_pose가 위치+자세를
+        # 회전행렬로 함께 유도 — 각도 하나만으로 긴 축만 맞추면 그 축에서 벗어난 부분이
+        # 반대로 뒤집힐 수 있어서 각 도구마다 직접 검증한 파라미터를 사용).
+        # - hammer.stl: 원점이 손잡이 길이 방향 중앙(native_offset=0), 손잡이=Z축/헤드=X축
+        #   (서 있는 T자 형태). 롤(X축 회전)로 눕혀야 헤드(X)는 그대로 두고 손잡이(Z)만
+        #   수평으로 옮겨져서 손잡이/헤드 둘 다 XY 평면에 남음(피치는 X<->Z를 섞어서 헤드가
+        #   수직으로 넘어감).
         # - screwdriver.stl: 실측 스캔(mm 단위라 0.001 스케일 필요), 원점이 팁(한쪽 끝),
-        #   긴 축이 Y -> 요(yaw) -90도로 눕힘 + 중심(팁에서 8cm)으로 오프셋.
+        #   긴 축이 Y, 길이 중심은 원점에서 -0.08m. 원형 단면이라 회전축 선택에 hammer
+        #   같은 제약은 없어서 요(Z축)만으로 충분.
         if TARGET_CLASS == 'tool-hammer':
             stl_path = '/home/rokey/ws_cobot2_pjt/src/cobot2_ws/m0609_rg2_bringup/meshes/hammer.stl'
             mesh_scale = 1.0
             obj_id = 'hammer'
-            world_position = (x, y, z)
-            world_orientation_rpy = (0.0, math.pi / 2, axis_angle)
-            gripper_position = (0.0, 0.0, 0.0)
-            # 그리퍼(rg2_tcp)는 grasp yaw로 이동해 있으므로, 메쉬는 실제 물체 방향과의
-            # 차이(axis_angle - yaw)만큼만 tcp 로컬 프레임에서 추가로 돌리면 됨.
-            gripper_orientation_rpy = (0.0, math.pi / 2, axis_angle - yaw)
+            world_position, world_quat, gripper_position, gripper_quat = compute_attach_pose(
+                flatten_roll=math.pi / 2, flatten_pitch=0.0, world_yaw_offset=math.pi / 2,
+                native_offset=(0.0, 0.0, 0.0), axis_angle=axis_angle, yaw=yaw,
+                detected_xyz=(x, y, z))
         elif TARGET_CLASS == 'screw2':
             stl_path = '/home/rokey/ws_cobot2_pjt/src/cobot2_ws/m0609_rg2_bringup/meshes/screwdriver.stl'
             mesh_scale = 0.001
             obj_id = 'screwdriver'
-            center_offset = 0.08  # 팁(원점) <-> 길이 중심 거리 (0.16m 길이의 절반)
-            theta_world = axis_angle - math.pi / 2
-            world_position = (x - center_offset * math.sin(theta_world),
-                              y + center_offset * math.cos(theta_world), z)
-            world_orientation_rpy = (0.0, 0.0, theta_world)
-            local_angle = axis_angle - yaw
-            theta_gripper = local_angle - math.pi / 2
-            gripper_position = (-center_offset * math.sin(theta_gripper),
-                                center_offset * math.cos(theta_gripper), 0.0)
-            gripper_orientation_rpy = (0.0, 0.0, theta_gripper)
+            world_position, world_quat, gripper_position, gripper_quat = compute_attach_pose(
+                flatten_roll=0.0, flatten_pitch=0.0, world_yaw_offset=-math.pi / 2,
+                native_offset=(0.0, -0.08, 0.0), axis_angle=axis_angle, yaw=yaw,
+                detected_xyz=(x, y, z))
         else:
             self.get_logger().error(f'미지원 TARGET_CLASS: {TARGET_CLASS}')
             return
@@ -709,7 +770,7 @@ class PickYoloTarget(Node):
         mesh_msg = None
         try:
             mesh_msg = load_stl_mesh(stl_path, scale=mesh_scale)
-            self.spawn_attached_object(obj_id, mesh_msg, world_position, world_orientation_rpy)
+            self.spawn_attached_object(obj_id, mesh_msg, world_position, world_quat)
             self.get_logger().info(f'{TARGET_CLASS} 검출 위치에 {obj_id} STL 스폰 완료')
         except Exception as e:
             self.get_logger().error(f'STL 스폰 실패: {e}')
@@ -734,7 +795,7 @@ class PickYoloTarget(Node):
         if not self.gripper_command('c'):
             return
         # 그리퍼를 닫은 후, 월드(base_link)에 있던 장애물을 그리퍼 프레임으로 리어태치
-        self.attach_object_to_gripper(obj_id, mesh_msg, gripper_position, gripper_orientation_rpy)
+        self.attach_object_to_gripper(obj_id, mesh_msg, gripper_position, gripper_quat)
         time.sleep(0.5)
         self.move_to_joints(pregrasp_joints)
         self.get_logger().info('pick 완료')
