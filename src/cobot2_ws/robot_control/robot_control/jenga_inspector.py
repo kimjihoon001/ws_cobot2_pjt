@@ -23,6 +23,7 @@ from tf2_ros import Buffer, TransformListener
 from ament_index_python.packages import get_package_share_directory
 from std_srvs.srv import Trigger
 from od_msg.srv import SrvDepthPosition
+from robot_control.onrobot import RG
 
 from rclpy.action import ActionClient
 from geometry_msgs.msg import Pose, Point, PointStamped
@@ -90,6 +91,9 @@ class JengaInspectorNode(Node):
         super().__init__("jenga_inspector")
         self.package_path = get_package_share_directory("robot_control")
         self.init_database()
+        
+        # OnRobot RG2 Gripper setup
+        self.gripper = RG("rg2", "192.168.1.1", "502")
         
         # YOLO init
         workspace_path = "/home/rokey/ws_cobot2_pjt"
@@ -894,6 +898,14 @@ class JengaInspectorNode(Node):
         self.current_hand_pos = None
         self.in_evasion = False
         self.clear_hand_obstacle()
+
+        # 젠가 검사 시작 전 그리퍼 열기 명령
+        try:
+            self.get_logger().info("Opening OnRobot RG2 gripper at start of inspection...")
+            self.gripper.open_gripper()
+            time.sleep(1.0) # 그리퍼가 완전히 열릴 때까지 잠시 대기
+        except Exception as e:
+            self.get_logger().error(f"Failed to open gripper: {e}")
         
         # Helper to ensure we move to JReady initially, with hand evasion check
         def move_to_initial_pose():
@@ -961,7 +973,7 @@ class JengaInspectorNode(Node):
         face_names = ["Front", "Right", "Back", "Left"]
         
         # 다중 각도 스윕으로 복구 (다양한 각도에서 교차 검증)
-        target_pitches = [30.0, 37.0, 45.0, 52.0, 60.0]
+        target_pitches = [30.0, 37.0, 45.0, 52.0]
         face_successful_poses = {i: [] for i in range(4)}
         
         for i in range(4):
@@ -1035,8 +1047,8 @@ class JengaInspectorNode(Node):
                     target_idx += 1
                     continue
 
-            self.get_logger().info("카메라 앵글 흔들림 보정을 위해 1.5초 대기 후 자동 촬영을 시작합니다...")
-            time.sleep(1.5) # Settle camera
+            self.get_logger().info("카메라 앵글 흔들림 보정을 위해 0.5초 대기 후 자동 촬영을 시작합니다...")
+            time.sleep(0.5) # Settle camera
 
             # Double check if hand was detected during settling time
             if self.hand_detected:
