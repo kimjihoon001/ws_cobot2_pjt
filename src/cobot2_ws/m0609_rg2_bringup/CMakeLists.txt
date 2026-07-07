@@ -16,6 +16,8 @@ install(
   PROGRAMS
     scripts/gripper_joint_state_publisher.py
     scripts/gripper_virtual_node.py
+    scripts/scene_builder.py
+    scripts/hand_avoidance.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
