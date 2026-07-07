@@ -5,6 +5,18 @@
 
 ---
 
+## 📂 주요 패키지 구성 요약
+본 시스템은 다음과 같은 핵심 ROS 2 패키지들로 구성되어 있습니다:
+* **[robot_control](file:///home/rokey/ws_cobot2_pjt/src/cobot2_ws/robot_control)**: 젠가 스캔 제어, MoveIt 조인트 명령 및 ROI 손 감지 콜백을 처리하는 메인 제어부 노드 (`jenga_inspector.py`)
+* **[object_detection](file:///home/rokey/ws_cobot2_pjt/src/cobot2_ws/object_detection)**: RealSense 카메라 연동 및 YOLOv8 온디바이스 젠가 검출 서비스 노드 (`jenga_detection.py`)
+* **[object_hand](file:///home/rokey/ws_cobot2_pjt/src/cobot2_ws/object_hand)**: YOLO 기반 손 3D 위치 추적 및 MoveIt용 5cm 구체 장애물 발행 노드
+* **[m0609_rg2_bringup](file:///home/rokey/ws_cobot2_pjt/src/cobot2_ws/m0609_rg2_bringup)**: 실제 두산 로봇 드라이버 및 카메라 통합 기동 런치파일 및 URDF 로드
+* **[m0609_rg2_moveit](file:///home/rokey/ws_cobot2_pjt/src/cobot2_ws/m0609_rg2_moveit)**: MoveIt 2 모션 플래닝 설정 관련 설정 및 런치파일
+* **[od_msg](file:///home/rokey/ws_cobot2_pjt/src/cobot2_ws/od_msg)**: 노드 간 좌표 통신에 쓰이는 사용자 정의 ROS 2 서비스 인터페이스 정의
+* **[onrobot-ros2](file:///home/rokey/ws_cobot2_pjt/src/cobot2_ws/onrobot-ros2)**: OnRobot RG2 그리퍼 제어 및 Modbus TCP 통신 드라이버
+
+---
+
 ## 🛠️ 하드웨어 구성
 - **로봇 암**: Doosan Robotics m0609 (네임스페이스: `/dsr01`, 제어 IP: `192.168.1.100`)
 - **그리퍼**: OnRobot RG2 (기본 연결 IP: `192.168.1.1`)
