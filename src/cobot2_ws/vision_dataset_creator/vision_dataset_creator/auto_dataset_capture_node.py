@@ -25,7 +25,7 @@ dsr_node = rclpy.create_node("vision_dataset_capture_node", namespace=ROBOT_ID)
 DR_init.__dsr__node = dsr_node
 
 try:
-    from DSR_ROBOT2 import movej, movel, movec, mwait, set_tcp
+    from DSR_ROBOT2 import movej, movel, movec, mwait
 except ImportError as e:
     print(f"Error importing DSR_ROBOT2: {e}")
     sys.exit()
@@ -235,12 +235,6 @@ class AutoDatasetCaptureNode(Node):
 
 def main(args=None):
     # DR_init 설정 전에 노드를 생성했으므로 여기서는 추가 초기화 불필요
-    try:
-        set_tcp("2FG_TCP")
-        print("TCP successfully set to 2FG_TCP")
-    except Exception as e:
-        print(f"Warning: Failed to set TCP to 2FG_TCP: {e}")
-        
     node = AutoDatasetCaptureNode()
     
     # 로봇 이동(mwait)은 블로킹 함수이므로, 이미지 콜백이 멈추지 않도록 별도의 스레드에서 실행
