@@ -30,9 +30,9 @@ class YoloInferenceNode(Node):
         super().__init__('yolo_inference_node')
         
         # YOLOv8 ONNX 모델 로드
-        model_path = '/home/rokey/cobot_ws/src/ws_cobot2_pjt/src/yolov8_ws/model/best.onnx'
+        model_path = '/home/rokey/cobot_ws/src/ws_cobot2_pjt/src/yolov8_ws/model/best_2.onnx'
         if not os.path.exists(model_path):
-            model_path = '/home/rokey/cobot_ws/src/ws_cobot2_pjt/src/yolov8_ws/model/best_1.onnx' # fallback
+            model_path = '/home/rokey/cobot_ws/src/ws_cobot2_pjt/src/yolov8_ws/model/best_2.onnx' # fallback
             
         self.get_logger().info(f'Loading YOLOv8 ONNX model from: {model_path}')
         self.model = YOLO(model_path, task='detect')
@@ -222,7 +222,7 @@ def main(args=None):
                             detected_classes.append(cls_name)
                             if cls_name == 'entire':
                                 entire_box = box
-                            elif 'hole' in cls_name.lower():
+                            elif cls_name.lower() == 'smallhole':
                                 hole_boxes.append(box)
                         
                         # 2. 'entire' 박스가 존재하면 기준점(중심점) 깊이 계산
@@ -290,18 +290,29 @@ def main(args=None):
                                         obj_v_depth = None
                                         
                                     if obj_v_depth is not None:
-                                        # entire 중심 수직 깊이에서 hole 중심 수직 깊이를 뺌 (결과가 양수면 hole이 위에 있음, 음수면 아래에 있음)
+                                        # entire 중심 수직 깊이에서 hole 중심 수직 깊이를 뺌
                                         relative_height = entire_v_depth - obj_v_depth
                                         
                                         # 젠가 1층 높이를 약 15mm로 가정하고 상대적인 층수 차이(Floor diff) 계산
                                         floor_diff = int(round(relative_height / 15.0))
                                         
-                                        # 터미널에 로그로 층수 차이와 높이 출력
-                                        node.get_logger().info(f"[Hole {idx+1}] entire 기준 상대 층수: {floor_diff:+}층 / 높이 차이: {relative_height:+.1f}mm")
+                                        # 수평 위치(Left, Center, Right) 3등분 판별
+                                        tower_width = ey2 - ey1
+                                        third = tower_width / 3.0
                                         
-                                        # 화면에 중심점(빨간색 원)과 측정된 층수/높이 출력
+                                        if v < ey1 + third:
+                                            horiz_pos = "Left"
+                                        elif v < ey1 + 2 * third:
+                                            horiz_pos = "Center"
+                                        else:
+                                            horiz_pos = "Right"
+                                        
+                                        # 터미널에 로그로 수평 위치, 층수 차이와 높이 출력
+                                        node.get_logger().info(f"[Hole {idx+1}] 위치: {horiz_pos} / 상대 층수: {floor_diff:+}층 / 오차: {relative_height:+.1f}mm")
+                                        
+                                        # 화면에 중심점(빨간색 원)과 측정된 위치, 층수 출력
                                         cv2.circle(annotated_frame, (valid_u, valid_v), 5, (0, 0, 255), -1)
-                                        cv2.putText(annotated_frame, f"{floor_diff:+}F", (u+10, v-10),
+                                        cv2.putText(annotated_frame, f"{horiz_pos} {floor_diff:+}F", (u+10, v-10),
                                                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                                     else:
                                         node.get_logger().warn(f"Hole {idx+1} 중심점 주변 깊이값이 유효하지 않습니다.")
