@@ -55,9 +55,10 @@ EEF_LINK = 'rg2_tcp'
 # fixed joint로 URDF에 반영되어 있어, MoveIt이 그리퍼 손끝을 직접 목표로 잡는다.
 SPEED_SCALE = 0.1              # 낮을수록 천천히 (가상모드라도 우선 저속 유지)
 PREGRASP_Z_OFFSET = 0.15       # 물체 위 접근 높이 (m)
-GRASP_Z_CLEARANCE = -0.015     # 감지 z는 원통형 손잡이의 맨 윗면(카메라에 보이는 지점)이라
-                                # 반지름만큼 아래(중심축 쪽)로 내려가서 잡음. 위로 주면
-                                # 손잡이 중심보다 한참 높은 허공에서 손가락이 닫혀 놓침
+GRASP_Z_CLEARANCE = -0.008     # 감지 z는 원통형 손잡이의 맨 윗면(카메라에 보이는 지점)이라
+                                # 아래(중심축 쪽)로 내려가서 잡음. 위로 주면 손잡이 중심보다
+                                # 한참 높은 허공에서 손가락이 닫혀 놓침. -0.015는 실기에서
+                                # 바닥과 충돌할 만큼 과했음 — 실측 미세조정 필요한 값.
 CARTESIAN_MAX_STEP = 0.01      # pregrasp -> grasp 하강 Cartesian Path 보간 간격 (m)
 
 # 특이점/조인트 리밋 회피용 미세 틸트 후보 (Roll, Pitch 오프셋, 라디안). solve_ik의
@@ -611,7 +612,9 @@ class PickYoloTarget(Node):
             req = GetPositionIK.Request()
             req.ik_request.group_name = GROUP_NAME
             req.ik_request.ik_link_name = EEF_LINK
-            req.ik_request.avoid_collisions = False
+            # 충돌 체크 없이 풀면 테이블/장애물과 겹치는 관절해도 "성공"으로 반환되어
+            # 그대로 실행되면 실제로 충돌함(실기로 확인) -> 반드시 True로 체크.
+            req.ik_request.avoid_collisions = True
             
             # 시드 조인트가 주어지면 이를 사용하고, 없으면 현재 조인트 상태를 사용 (wrist flip 방지)
             if seed_joints is not None:
@@ -897,8 +900,11 @@ class PickYoloTarget(Node):
         mesh_msg = None
         try:
             mesh_msg = load_stl_mesh(stl_path, scale=mesh_scale)
-            self.spawn_attached_object(obj_id, mesh_msg, world_position, world_quat)
-            self.get_logger().info(f'{detected_class} 검출 위치에 {obj_id} STL 스폰 완료')
+            # TODO(임시 진단용): grasp 지점 IK가 계속 실패하는 게 방금 스폰한 이 메쉬랑
+            # touch_links 안 맞아서 충돌 처리되는 건지 확인하려고 스폰 잠깐 꺼둠.
+            # 확인 후 되돌릴 것.
+            # self.spawn_attached_object(obj_id, mesh_msg, world_position, world_quat)
+            self.get_logger().info(f'{detected_class} 검출 위치에 {obj_id} STL 스폰 완료(임시로 생략)')
         except Exception as e:
             self.get_logger().error(f'STL 스폰 실패: {e}')
 
