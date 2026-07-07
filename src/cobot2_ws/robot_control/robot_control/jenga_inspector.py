@@ -790,6 +790,7 @@ class JengaInspectorNode(Node):
         inspection_failed = False
         failed_reasons = []
         overall_confidence_list = []
+        inspection_reports = [] # 최종 요약 보고서 저장용
 
         # Iterate targets with safety loop
         target_idx = 0
@@ -904,12 +905,37 @@ class JengaInspectorNode(Node):
             self.get_logger().info(report_msg)
             print(report_msg, flush=True)
 
+            # 요약 보고서용 데이터 누적
+            inspection_reports.append((face_name, pitch_deg, face_status_str, counts))
+
             # Move on to next target
             target_idx += 1
 
         # 5. Determine overall inspection result and log to SQLite
         final_result = "FAIL" if inspection_failed else "PASS"
         avg_overall_confidence = np.mean(overall_confidence_list) if overall_confidence_list else 0.0
+        
+        # 최종 완료 요약 보고서 터미널 강제 출력
+        summary_msg = (
+            f"\n=================================================="
+            f"\n[젠가 불량 검사 최종 완료 요약 보고서]"
+            f"\n--------------------------------------------------"
+            f"\n  * 최종 판정 결과 : {final_result}"
+            f"\n  * 평균 검출 신뢰도: {avg_overall_confidence:.4f}"
+            f"\n  * 상세 촬영 요약  :"
+        )
+        for idx, (face, pitch, status, cnt) in enumerate(inspection_reports):
+            summary_msg += f"\n    - [{idx+1}/{len(inspection_reports)}] {face} 면 (각도 {pitch}°): {status} | 감지={cnt}"
+            
+        if inspection_failed:
+            summary_msg += f"\n  * 불량 검출 세부 사유:"
+            for reason in failed_reasons:
+                summary_msg += f"\n    - {reason}"
+        summary_msg += f"\n==================================================\n"
+        
+        self.get_logger().info(summary_msg)
+        print(summary_msg, flush=True)
+
         self.log_result_to_db(final_result, avg_overall_confidence)
 
         # 6. Return back to Home position with safety evasion checks
