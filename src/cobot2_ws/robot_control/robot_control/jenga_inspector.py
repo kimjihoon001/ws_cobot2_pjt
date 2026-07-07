@@ -118,7 +118,88 @@ class JengaInspectorNode(Node):
             '/run_jenga_inspection',
             self.handle_run_jenga_inspection
         )
+        
+        # Hand avoidance parameters & states
+        self.hand_detected = False
+        self.current_hand_pos = None
+        self.active_goal_handle = None
+        self.in_evasion = False
+        self.last_log_time = 0.0
+        
+        # Subscribe to hand position topic with a ReentrantCallbackGroup to prevent service call deadlocks
+        from rclpy.callback_groups import ReentrantCallbackGroup
+        self.hand_sub = self.create_subscription(
+            Point,
+            '/hand_position',
+            self.hand_position_callback,
+            10,
+            callback_group=ReentrantCallbackGroup()
+        )
+        
         self.get_logger().info("JengaInspectorNode initialized. Service '/run_jenga_inspection' is ready.")
+
+    def hand_position_callback(self, msg):
+        """Processes hand position, filters by robot workspace ROI, and updates obstacle."""
+        is_clear_signal = msg.z < -1.0
+        
+        # 타이트한 작업 공간 ROI 필터 (단위: 미터)
+        # X: 앞쪽 22cm ~ 55cm, Y: 좌우 -30cm ~ 30cm, Z: 높이 -2cm ~ 45cm
+        in_roi = False
+        if not is_clear_signal:
+            in_roi = (0.22 <= msg.x <= 0.55) and (-0.30 <= msg.y <= 0.30) and (-0.02 <= msg.z <= 0.45)
+            
+        if is_clear_signal or not in_roi:
+            if self.hand_detected:
+                self.hand_detected = False
+                self.current_hand_pos = None
+                self.clear_hand_obstacle()
+                self.get_logger().info("Hand cleared (left FOV or exited workspace ROI).")
+        else:
+            self.hand_detected = True
+            self.current_hand_pos = [msg.x, msg.y, msg.z]
+            now = time.time()
+            if now - self.last_log_time > 1.0:
+                self.get_logger().info(f"Hand detected inside active ROI: x={msg.x:.3f}m, y={msg.y:.3f}m, z={msg.z:.3f}m")
+                self.last_log_time = now
+            self.update_hand_obstacle(msg.x, msg.y, msg.z)
+
+    def update_hand_obstacle(self, x, y, z):
+        """Spawns/Updates hand obstacle in the MoveIt planning scene."""
+        obj = CollisionObject()
+        obj.header.frame_id = 'base_link'
+        obj.id = 'human_hand'
+
+        sphere = SolidPrimitive()
+        sphere.type = SolidPrimitive.SPHERE
+        sphere.dimensions = [0.025] # 2.5cm safety sphere radius (5cm diameter)
+
+        pose = Pose()
+        pose.position.x = x
+        pose.position.y = y
+        pose.position.z = z
+        pose.orientation.w = 1.0
+
+        obj.primitives = [sphere]
+        obj.primitive_poses = [pose]
+        obj.operation = CollisionObject.ADD
+
+        scene = PlanningScene()
+        scene.world.collision_objects = [obj]
+        scene.is_diff = True
+        self.scene_pub.publish(scene)
+
+    def clear_hand_obstacle(self):
+        """Removes the hand obstacle from the MoveIt planning scene."""
+        obj = CollisionObject()
+        obj.header.frame_id = 'base_link'
+        obj.id = 'human_hand'
+        obj.operation = CollisionObject.REMOVE
+
+        scene = PlanningScene()
+        scene.world.collision_objects = [obj]
+        scene.is_diff = True
+        self.scene_pub.publish(scene)
+        self.get_logger().info("Cleared hand obstacle from planning scene.")
 
     def init_database(self):
         """Creates SQLite database and inspection_logs table if not exists."""
@@ -247,7 +328,8 @@ class JengaInspectorNode(Node):
                 return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
 
     def move_to_joints_moveit(self, joint_positions_deg):
-        """Plans and executes motion to the target joint positions (in degrees) using MoveGroup action."""
+        """Plans and executes motion to the target joint positions (in degrees) using MoveGroup action.
+        Aborts planning or execution if a hand is detected (unless in safety evasion mode)."""
         # Convert degrees to radians
         joint_positions_rad = [np.radians(angle) for angle in joint_positions_deg]
         
@@ -268,7 +350,7 @@ class JengaInspectorNode(Node):
         req.start_state.is_diff = True  # Start from current actual robot state
         req.goal_constraints = [goal_constraints]
         req.allowed_planning_time = 5.0
-        # Velocity and acceleration scaling factors (0.2 is 20%, safe velocity)
+        # Velocity and acceleration scaling factors
         req.max_velocity_scaling_factor = 0.2
         req.max_acceleration_scaling_factor = 0.2
 
@@ -279,10 +361,18 @@ class JengaInspectorNode(Node):
         goal_msg.request = req
         goal_msg.planning_options = opts
 
+        # Check before sending goal (bypass check if in safety evasion mode)
+        if self.hand_detected and not getattr(self, 'in_evasion', False):
+            self.get_logger().warn('Hand detected before planning! Aborting motion.')
+            return False
+
         self.get_logger().info('Sending MoveGroup Goal...')
         send_future = self._ac.send_goal_async(goal_msg)
         
         while rclpy.ok() and not send_future.done():
+            if self.hand_detected and not getattr(self, 'in_evasion', False):
+                self.get_logger().warn('Hand detected during planning phase! Aborting motion.')
+                return False
             time.sleep(0.05)
 
         goal_handle = send_future.result()
@@ -290,11 +380,26 @@ class JengaInspectorNode(Node):
             self.get_logger().error('Motion planning request rejected by MoveGroup.')
             return False
 
+        self.active_goal_handle = goal_handle
         self.get_logger().info('Motion planning accepted. Executing...')
         result_future = goal_handle.get_result_async()
         
+        aborted = False
         while rclpy.ok() and not result_future.done():
+            if self.hand_detected and not getattr(self, 'in_evasion', False):
+                self.get_logger().warn('Hand detected during execution phase! Cancelling current motion...')
+                cancel_future = goal_handle.cancel_goal_async()
+                while rclpy.ok() and not cancel_future.done():
+                    time.sleep(0.01)
+                self.get_logger().info('Motion cancelled successfully.')
+                aborted = True
+                break
             time.sleep(0.05)
+
+        self.active_goal_handle = None
+        
+        if aborted:
+            return False
 
         result = result_future.result().result
         if result.error_code.val == 1:
@@ -303,6 +408,24 @@ class JengaInspectorNode(Node):
         else:
             self.get_logger().error(f'MoveGroup execution failed with error code: {result.error_code.val}')
             return False
+
+    def execute_safety_evasion(self):
+        """Safely retreats to home position (JReady) by avoiding the hand obstacle.
+        If planning fails, it stops and waits until the path is clear."""
+        JReady = [-44.26, 18.14, 60.38, -0.02, 101.41, -36.57]
+        self.get_logger().warn("Safety Evasion triggered! Attempting to move to Home (JReady) by avoiding obstacles...")
+        
+        self.in_evasion = True
+        while rclpy.ok():
+            success = self.move_to_joints_moveit(JReady)
+            if success:
+                self.get_logger().info("Safety Evasion complete. Successfully returned to Home (JReady).")
+                break
+            else:
+                self.get_logger().warn("Safety Evasion planning failed (hand might be directly blocking). Retrying in 2.0 seconds...")
+                time.sleep(2.0)
+                
+        self.in_evasion = False
 
     def log_result_to_db(self, result, confidence):
         """Logs inspection result to the database."""
@@ -545,16 +668,42 @@ class JengaInspectorNode(Node):
     def _run_inspection_thread(self, request, response):
         """Background thread executing the Jenga inspection and scanning sequence."""
         JReady = [-44.26, 18.14, 60.38, -0.02, 101.41, -36.57]
-        # 1. Move directly to custom initial scan pose
-        self.get_logger().info("Moving directly to initial scan pose [-44.26, 18.14, 60.38, -0.02, 101.41, -36.57]...")
-        if not self.move_to_joints_moveit(JReady):
+        
+        # Initialize/Reset states at start of inspection
+        self.hand_detected = False
+        self.current_hand_pos = None
+        self.in_evasion = False
+        self.clear_hand_obstacle()
+        
+        # Helper to ensure we move to JReady initially, with hand evasion check
+        def move_to_initial_pose():
+            while rclpy.ok():
+                self.get_logger().info("Moving to initial scan pose JReady...")
+                if self.move_to_joints_moveit(JReady):
+                    return True
+                if self.hand_detected:
+                    self.get_logger().warn("Hand detected during initial pose movement. Evading to JReady...")
+                    self.execute_safety_evasion()
+                    self.get_logger().info("Waiting for hand to clear before resuming...")
+                    while rclpy.ok() and self.hand_detected:
+                        time.sleep(0.5)
+                else:
+                    # Generic motion planning failure (e.g. workspace limitation)
+                    return False
+            return False
+
+        if not move_to_initial_pose():
             response.success = False
             response.message = "Failed to move to initial scan pose"
             return
                 
         time.sleep(1.5) # Settle camera
 
-        # 2. Get real Jenga position via service call (now looking from the side)
+        # Get real Jenga position via service call (ensure hand is cleared first)
+        while rclpy.ok() and self.hand_detected:
+            self.get_logger().warn("Hand detected. Waiting for hand to clear before camera scan...")
+            time.sleep(1.0)
+
         self.get_logger().info("Calling /get_jenga_position service from side view...")
         if not self.get_position_client.wait_for_service(timeout_sec=3.0):
             response.success = False
@@ -565,7 +714,7 @@ class JengaInspectorNode(Node):
         pos_req.target = "top"
         future = self.get_position_client.call_async(pos_req)
         
-        # Wait for future to complete in a non-blocking loop
+        # Wait for future to complete
         while rclpy.ok() and not future.done():
             time.sleep(0.1)
             
@@ -574,23 +723,20 @@ class JengaInspectorNode(Node):
             response.success = False
             response.message = "Failed to detect Jenga block 'top' or coordinates out of range"
             return
- 
+  
         x_cam, y_cam, z_cam, yaw_cam = res.depth_position[:4]
         self.get_logger().info(f"Detected Jenga camera pose: x={x_cam:.2f}, y={y_cam:.2f}, z={z_cam:.2f}, yaw={yaw_cam:.4f}")
- 
+  
         # Translate to Base frame using non-blocking TF lookup
         robot_posx = self.get_current_pose_tf()
         p_base, yaw_base = self.transform_to_base([x_cam, y_cam, z_cam], yaw_cam, robot_posx)
         self.get_logger().info(f"Translated Base pose: x={p_base[0]:.2f}, y={p_base[1]:.2f}, z={p_base[2]:.2f}, yaw={np.degrees(yaw_base):.2f}°")
- 
+  
         # 3. Spawn STL mesh in RViz
-        # Since the STL and box primitive origins are at their centers,
-        # we spawn the mesh at the tower's vertical center: Z = top_z - 42.0 mm
         spawn_z = p_base[2] - 42.0
         self.spawn_jenga_mesh(p_base[0], p_base[1], spawn_z, yaw_base)
- 
-        # 4. Generate 4 scanning viewpoints around the Jenga block using Spherical coordinates (pitch=45 deg, distance=280 mm)
-        # We calculate the scanning target at the vertical center of the Jenga tower: Z = top_z - 42.0 mm
+  
+        # 4. Generate 4 scanning viewpoints around the Jenga block using Spherical coordinates
         p_target = [p_base[0], p_base[1], p_base[2] - 42.0]
         
         face_names = ["Front", "Right", "Back", "Left"]
@@ -599,7 +745,6 @@ class JengaInspectorNode(Node):
         for i in range(4):
             theta = yaw_base + i * (np.pi / 2.0)
             
-            # 카메라 거리와 피치 각도를 순차적으로 튜닝해가며 IK 해를 찾음 (기본값: d=280.0, p=45.0)
             joint_angles = None
             for d in [280.0, 250.0, 310.0]:
                 for p in [45.0, 35.0, 55.0]:
@@ -614,9 +759,9 @@ class JengaInspectorNode(Node):
             if joint_angles:
                 successful_viewpoints.append((i, face_names[i], joint_angles))
             else:
-                self.get_logger().warn(f"Could not find IK solution for Scan Position {i} ({face_names[i]}) even with distance/pitch adjustments. Skipping.")
+                self.get_logger().warn(f"Could not find IK solution for Scan Position {i} ({face_names[i]}). Skipping.")
 
-        # 4면 중 연속된(인접한 90도 간격) 2면을 촬영하도록 인접한 성공 포인트 쌍 선택
+        # Choose adjacent faces
         scan_targets = []
         n_succ = len(successful_viewpoints)
         found_adjacent = False
@@ -625,7 +770,7 @@ class JengaInspectorNode(Node):
                 idx1 = successful_viewpoints[i][0]
                 idx2 = successful_viewpoints[j][0]
                 diff = abs(idx1 - idx2)
-                if diff == 1 or diff == 3:  # 90도 회전 관계 (인접면)
+                if diff == 1 or diff == 3:  # 90 deg rotation
                     scan_targets = [successful_viewpoints[i], successful_viewpoints[j]]
                     found_adjacent = True
                     break
@@ -641,27 +786,71 @@ class JengaInspectorNode(Node):
         failed_reasons = []
         overall_confidence_list = []
 
-        for face_idx, face_name, joint_angles in scan_targets:
+        # Iterate targets with safety loop
+        target_idx = 0
+        while target_idx < len(scan_targets):
+            face_idx, face_name, joint_angles = scan_targets[target_idx]
             self.get_logger().info(f"Moving to Scan Position {face_idx} ({face_name})...")
-            if not self.move_to_joints_moveit(joint_angles):
-                self.get_logger().error(f"Failed to move to Scan Position {face_idx} via MoveGroup")
-                continue
+            
+            # Try to move to the scan position
+            success = self.move_to_joints_moveit(joint_angles)
+            if not success:
+                if self.hand_detected:
+                    self.get_logger().warn(f"Hand detected while moving to Scan Position {face_name}! Initiating safety evasion...")
+                    self.execute_safety_evasion()
+                    
+                    self.get_logger().warn("Waiting for hand to clear before resuming scan...")
+                    while rclpy.ok() and self.hand_detected:
+                        time.sleep(0.5)
+                        
+                    self.get_logger().info(f"Hand cleared. Resuming scan of {face_name} face (retrying same position)...")
+                    # Do not increment target_idx; retry this same scan target
+                    continue
+                else:
+                    self.get_logger().error(f"Failed to move to Scan Position {face_idx} via MoveGroup due to non-safety reasons. Skipping face.")
+                    target_idx += 1
+                    continue
+
             time.sleep(1.0) # Settle camera
+
+            # Double check if hand was detected during settling time
+            if self.hand_detected:
+                self.get_logger().warn(f"Hand detected right after arrival at {face_name}! Initiating safety evasion...")
+                self.execute_safety_evasion()
+                self.get_logger().warn("Waiting for hand to clear before resuming scan...")
+                while rclpy.ok() and self.hand_detected:
+                    time.sleep(0.5)
+                self.get_logger().info(f"Hand cleared. Resuming scan of {face_name} face...")
+                continue # Retry this target position
 
             # Run YOLO feature detection
             if not self.detect_features_client.wait_for_service(timeout_sec=3.0):
                 self.get_logger().error("Service /detect_jenga_features not available")
+                target_idx += 1
                 continue
 
             detect_req = Trigger.Request()
             detect_future = self.detect_features_client.call_async(detect_req)
-            # Wait for future in a non-blocking loop
+            
+            # Wait for perception to finish or check hand intrusion
             while rclpy.ok() and not detect_future.done():
+                if self.hand_detected:
+                    break
                 time.sleep(0.1)
-            detect_res = detect_future.result()
+                
+            if self.hand_detected:
+                self.get_logger().warn(f"Hand detected during feature detection on {face_name}! Evading to JReady...")
+                self.execute_safety_evasion()
+                self.get_logger().warn("Waiting for hand to clear before resuming scan...")
+                while rclpy.ok() and self.hand_detected:
+                    time.sleep(0.5)
+                self.get_logger().info(f"Hand cleared. Resuming scan of {face_name} face...")
+                continue # Retry this target position
 
+            detect_res = detect_future.result()
             if not detect_res or not detect_res.success:
                 self.get_logger().warn(f"Failed to detect features on {face_name} face.")
+                target_idx += 1
                 continue
 
             # Parse JSON features
@@ -669,6 +858,7 @@ class JengaInspectorNode(Node):
                 features = json.loads(detect_res.message)
             except Exception as e:
                 self.get_logger().error(f"Failed to parse JSON features: {e}")
+                target_idx += 1
                 continue
 
             # Count classes detected
@@ -695,15 +885,29 @@ class JengaInspectorNode(Node):
                     f"small={counts['smallhole']} (expected {expected['smallhole']}), "
                     f"long={counts['longhole']} (expected {expected['longhole']})"
                 )
+            
+            # Move on to next target
+            target_idx += 1
 
         # 5. Determine overall inspection result and log to SQLite
         final_result = "FAIL" if inspection_failed else "PASS"
         avg_overall_confidence = np.mean(overall_confidence_list) if overall_confidence_list else 0.0
         self.log_result_to_db(final_result, avg_overall_confidence)
 
-        # 6. Return back to Home position
+        # 6. Return back to Home position with safety evasion checks
         self.get_logger().info("Inspection complete. Returning to Home...")
-        self.move_to_joints_moveit(JReady)
+        while rclpy.ok():
+            if self.move_to_joints_moveit(JReady):
+                break
+            if self.hand_detected:
+                self.execute_safety_evasion()
+                while rclpy.ok() and self.hand_detected:
+                    time.sleep(0.5)
+            else:
+                break
+
+        # Cleanup obstacles
+        self.clear_hand_obstacle()
 
         # Format output message
         if final_result == "PASS":
@@ -714,6 +918,7 @@ class JengaInspectorNode(Node):
             response.message = f"Jenga Inspection: FAIL. Reasons: " + " | ".join(failed_reasons)
 
         return response
+
 
     def destroy_node(self):
         """Clean up the helper node and executor upon destruction."""
