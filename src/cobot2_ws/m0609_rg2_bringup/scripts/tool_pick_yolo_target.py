@@ -716,7 +716,9 @@ class PickYoloTarget(Node):
         res = future.result()
         if res is None or res.fraction < 0.99:
             fraction = res.fraction if res is not None else 0.0
-            self.get_logger().error(f'Cartesian Path 계산 실패 (fraction={fraction:.2f})')
+            error_code = res.error_code.val if res is not None else None
+            self.get_logger().error(
+                f'Cartesian Path 계산 실패 (fraction={fraction:.2f}, error_code={error_code})')
             return False
 
         if PLAN_ONLY:
