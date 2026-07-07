@@ -1,4 +1,5 @@
 import math
+import struct
 import time
 import cv2
 
@@ -74,35 +75,55 @@ def quat_from_rpy(roll, pitch, yaw):
     )
 
 
-def load_stl_mesh(filepath):
+def _add_vertex(mesh, vertices_map, current_triangle, x, y, z, scale):
+    pt_key = (round(x * scale, 6), round(y * scale, 6), round(z * scale, 6))
+    if pt_key not in vertices_map:
+        p = Point()
+        p.x, p.y, p.z = pt_key
+        vertices_map[pt_key] = len(mesh.vertices)
+        mesh.vertices.append(p)
+    current_triangle.append(vertices_map[pt_key])
+    if len(current_triangle) == 3:
+        triangle = MeshTriangle()
+        triangle.vertex_indices = current_triangle[:]
+        mesh.triangles.append(triangle)
+        current_triangle.clear()
+
+
+def load_stl_mesh(filepath, scale=1.0):
+    """ASCII/바이너리 STL을 모두 지원. scale은 파일 좌표 단위를 미터로
+    맞추기 위한 배율(예: mm 단위로 내보낸 스캔이면 0.001)."""
     mesh = Mesh()
     vertices_map = {}
     current_triangle = []
-    
-    with open(filepath, 'r') as f:
-        for line in f:
+
+    with open(filepath, 'rb') as f:
+        data = f.read()
+
+    is_binary = False
+    if len(data) >= 84:
+        tri_count = struct.unpack('<I', data[80:84])[0]
+        if 84 + tri_count * 50 == len(data):
+            is_binary = True
+
+    if is_binary:
+        offset = 84
+        for _ in range(tri_count):
+            record = data[offset:offset + 50]
+            vals = struct.unpack('<12fH', record)
+            for k in (3, 6, 9):  # normal(0:3) 건너뛰고 v1, v2, v3만 사용
+                _add_vertex(mesh, vertices_map, current_triangle,
+                            vals[k], vals[k + 1], vals[k + 2], scale)
+            offset += 50
+    else:
+        for line in data.decode('utf-8', errors='ignore').splitlines():
             line = line.strip()
-            if line.startswith('vertex'):
-                parts = line.split()
-                # vertex x y z
-                x = float(parts[1])
-                y = float(parts[2])
-                z = float(parts[3])
-                
-                # 이미 m 단위이므로 스케일링 불필요
-                pt_key = (round(x, 6), round(y, 6), round(z, 6))
-                if pt_key not in vertices_map:
-                    p = Point()
-                    p.x, p.y, p.z = x, y, z
-                    vertices_map[pt_key] = len(mesh.vertices)
-                    mesh.vertices.append(p)
-                
-                current_triangle.append(vertices_map[pt_key])
-                if len(current_triangle) == 3:
-                    triangle = MeshTriangle()
-                    triangle.vertex_indices = current_triangle
-                    mesh.triangles.append(triangle)
-                    current_triangle = []
+            if not line.startswith('vertex'):
+                continue
+            _, xs, ys, zs = line.split()
+            _add_vertex(mesh, vertices_map, current_triangle,
+                        float(xs), float(ys), float(zs), scale)
+
     return mesh
 
 
@@ -332,34 +353,36 @@ class PickYoloTarget(Node):
         return pose
 
     def axis_yaw(self, head_px, tail_px):
-        """head<->tail keypoint 축을 base_link 수평면 각도로 변환하고, 그리퍼가
-        축과 90도로(손잡이 폭 방향) 물리도록 수직으로 돌린 yaw를 반환."""
+        """head<->tail keypoint 축을 base_link 수평면 각도로 변환.
+        (axis_angle, yaw) 튜플로 반환:
+          - axis_angle: 물체의 실제 방향(머리<-꼬리, 180도 뒤집기 없음). 부착 메쉬
+            방향처럼 머리/꼬리 비대칭 형상을 정확히 정렬해야 하는 곳에 사용.
+          - yaw: 그리퍼 목표 자세용. 평행 2핑거 그리퍼는 yaw와 yaw+180도*k가 파지
+            결과는 같으므로, joint_6를 불필요하게 크게 돌리지 않도록 axis_angle에
+            180도의 정수배를 더해 현재 joint_6와 가장 가까운 값을 선택한 것."""
         head_depth = self._sample_depth(int(round(head_px[0])), int(round(head_px[1])))
         tail_depth = self._sample_depth(int(round(tail_px[0])), int(round(tail_px[1])))
         if head_depth is None or tail_depth is None:
             self.get_logger().warn('축 keypoint depth 없음 — yaw=0(기본 top-down)으로 대체')
-            return 0.0
+            return 0.0, 0.0
 
         hx, hy, _ = self.pixel_to_base_xyz(int(round(head_px[0])), int(round(head_px[1])), head_depth)
         tx, ty, _ = self.pixel_to_base_xyz(int(round(tail_px[0])), int(round(tail_px[1])), tail_depth)
         axis_angle = math.atan2(hy - ty, hx - tx)
-        yaw = axis_angle  # 해머 축과 수직 방향으로 잡기 위해 90도 돌린 각도 반영 (기존 +pi/2가 평행으로 동작했으므로 제거)
-        yaw = math.atan2(math.sin(yaw), math.cos(yaw))  # -180~180도로 정규화
+        axis_angle = math.atan2(math.sin(axis_angle), math.cos(axis_angle))  # -180~180도로 정규화
+        yaw = axis_angle
 
-        # 평행 2핑거 그리퍼는 yaw와 yaw+180도*k가 전부 같은 파지 결과.
-        # top-down 그립에서 yaw 변화는 대체로 joint_6가 흡수하므로(근사치, 정확한 IK
-        # 값은 아님), 여러 후보 중 현재 joint_6와 가장 가까운 값을 선택해서
-        # joint_6가 불필요하게 큰 회전/랩어라운드를 하지 않게 함.
         if self.current_joint6 is None:
             # 현재 값을 모르면 기본 -90~90도로 접어서 반환
             if yaw > math.pi / 2:
                 yaw -= math.pi
             elif yaw <= -math.pi / 2:
                 yaw += math.pi
-            return yaw
+            return axis_angle, yaw
 
         candidates = [yaw + k * math.pi for k in range(-3, 4)]
-        return min(candidates, key=lambda c: abs(c - self.current_joint6))
+        yaw = min(candidates, key=lambda c: abs(c - self.current_joint6))
+        return axis_angle, yaw
 
     def move_to_pose(self, pose: Pose, speed_scale=SPEED_SCALE):
         sphere = SolidPrimitive()
@@ -555,25 +578,22 @@ class PickYoloTarget(Node):
         self.get_logger().error(f'실패: error_code={result.error_code.val}')
         return False
 
-    def spawn_attached_object(self, obj_id, mesh_msg, x, y, z, yaw, link_name='base_link'):
+    def spawn_attached_object(self, obj_id, mesh_msg, position, orientation_rpy, link_name='base_link'):
+        """position/orientation_rpy는 도구별로 다른 메쉬 원점/긴 축 방향을 반영해
+        호출부(run())에서 미리 계산해 넘긴다."""
         from moveit_msgs.msg import AttachedCollisionObject, CollisionObject
-        
+
         aco = AttachedCollisionObject()
         aco.link_name = link_name
-        
+
         co = CollisionObject()
         co.header.frame_id = PLANNING_FRAME
         co.id = obj_id
-        
-        pose = Pose()
-        # hammer.stl은 원점이 이미 손잡이 길이 방향 중앙(generate_hammer.py 참고)이라
-        # 스크루드라이버 때와 달리 별도 위치 오프셋 없이 검출 중심점을 그대로 사용
-        pose.position.x = x
-        pose.position.y = y
-        pose.position.z = z
 
-        # 서 있는 망치 STL 메쉬를 90도 피치 회전시켜 눕히고 yaw 적용
-        qx, qy, qz, qw = quat_from_rpy(0.0, math.pi / 2, yaw)
+        pose = Pose()
+        pose.position.x, pose.position.y, pose.position.z = position
+
+        qx, qy, qz, qw = quat_from_rpy(*orientation_rpy)
         pose.orientation.x = qx
         pose.orientation.y = qy
         pose.orientation.z = qz
@@ -586,7 +606,7 @@ class PickYoloTarget(Node):
         aco.object = co
         # 터치 허용 링크 설정: 그리퍼 핑거들이 메쉬와 충돌해도 MoveIt이 에러(-27)를 내지 않도록 설정
         aco.touch_links = [
-            'rg2_left_inner_finger', 'rg2_right_inner_finger', 
+            'rg2_left_inner_finger', 'rg2_right_inner_finger',
             'rg2_left_inner_knuckle', 'rg2_right_inner_knuckle',
             'rg2_left_outer_knuckle', 'rg2_right_outer_knuckle',
             'rg2_base_link',
@@ -599,24 +619,22 @@ class PickYoloTarget(Node):
             time.sleep(0.1)
         self.get_logger().info(f"물체 '{obj_id}'가 '{link_name}'에 부착된 상태(실제 장애물 판정)로 스폰되었습니다.")
 
-    def attach_object_to_gripper(self, obj_id, mesh_msg):
+    def attach_object_to_gripper(self, obj_id, mesh_msg, position, orientation_rpy):
+        """position/orientation_rpy는 도구별로 다른 메쉬 원점/긴 축 방향을 반영해
+        호출부(run())에서 미리 계산해 넘긴다 (rg2_tcp 기준 로컬 좌표)."""
         from moveit_msgs.msg import AttachedCollisionObject, CollisionObject
-        
+
         aco = AttachedCollisionObject()
         aco.link_name = EEF_LINK
-        
+
         co = CollisionObject()
         co.header.frame_id = EEF_LINK  # 그리퍼 팁(rg2_tcp) 기준 좌표계
         co.id = obj_id
-        
-        pose = Pose()
-        # hammer.stl 원점이 이미 손잡이 길이 방향 중앙이라 rg2_tcp 원점에 그대로 맞추면 됨
-        pose.position.x = 0.0
-        pose.position.y = 0.0
-        pose.position.z = 0.0
 
-        # 그리퍼 팁 방향과 일치하도록 메쉬를 눕혀둠 (로컬 피치 90도)
-        qx, qy, qz, qw = quat_from_rpy(0.0, math.pi / 2, 0.0)
+        pose = Pose()
+        pose.position.x, pose.position.y, pose.position.z = position
+
+        qx, qy, qz, qw = quat_from_rpy(*orientation_rpy)
         pose.orientation.x = qx
         pose.orientation.y = qy
         pose.orientation.z = qz
@@ -628,7 +646,7 @@ class PickYoloTarget(Node):
         
         aco.object = co
         aco.touch_links = [
-            'rg2_left_inner_finger', 'rg2_right_inner_finger', 
+            'rg2_left_inner_finger', 'rg2_right_inner_finger',
             'rg2_left_inner_knuckle', 'rg2_right_inner_knuckle',
             'rg2_left_outer_knuckle', 'rg2_right_outer_knuckle',
             'rg2_base_link',
@@ -649,16 +667,50 @@ class PickYoloTarget(Node):
 
         cx, cy, depth_m, head_px, tail_px = detection
         x, y, z = self.pixel_to_base_xyz(cx, cy, depth_m)
-        yaw = self.axis_yaw(head_px, tail_px)
+        axis_angle, yaw = self.axis_yaw(head_px, tail_px)
         self.get_logger().info(
-            f'base_link 좌표: ({x:.3f}, {y:.3f}, {z:.3f}), yaw={math.degrees(yaw):.1f}deg')
+            f'base_link 좌표: ({x:.3f}, {y:.3f}, {z:.3f}), '
+            f'axis_angle={math.degrees(axis_angle):.1f}deg, yaw={math.degrees(yaw):.1f}deg')
 
-        # 해머 검출 위치에 hammer.stl 메쉬 스폰 (base_link에 부착된 실제 장애물 상태)
-        stl_path = '/home/rokey/ws_cobot2_pjt/src/cobot2_ws/m0609_rg2_bringup/meshes/hammer.stl'
+        # 도구별 메쉬 파일/스케일/부착 자세 계산.
+        # 메쉬 방향은 머리/꼬리가 있는 비대칭 형상이므로 grasp용 yaw(joint_6 근접을 위해
+        # 180도씩 뒤집힐 수 있음)가 아니라 실제 물체 방향인 axis_angle을 기준으로 계산.
+        # - hammer.stl: 원점이 손잡이 길이 방향 중앙, 긴 축이 Z(서 있는 형태) -> 피치 90도로 눕힘.
+        # - screwdriver.stl: 실측 스캔(mm 단위라 0.001 스케일 필요), 원점이 팁(한쪽 끝),
+        #   긴 축이 Y -> 요(yaw) -90도로 눕힘 + 중심(팁에서 8cm)으로 오프셋.
+        if TARGET_CLASS == 'tool-hammer':
+            stl_path = '/home/rokey/ws_cobot2_pjt/src/cobot2_ws/m0609_rg2_bringup/meshes/hammer.stl'
+            mesh_scale = 1.0
+            obj_id = 'hammer'
+            world_position = (x, y, z)
+            world_orientation_rpy = (0.0, math.pi / 2, axis_angle)
+            gripper_position = (0.0, 0.0, 0.0)
+            # 그리퍼(rg2_tcp)는 grasp yaw로 이동해 있으므로, 메쉬는 실제 물체 방향과의
+            # 차이(axis_angle - yaw)만큼만 tcp 로컬 프레임에서 추가로 돌리면 됨.
+            gripper_orientation_rpy = (0.0, math.pi / 2, axis_angle - yaw)
+        elif TARGET_CLASS == 'screw2':
+            stl_path = '/home/rokey/ws_cobot2_pjt/src/cobot2_ws/m0609_rg2_bringup/meshes/screwdriver.stl'
+            mesh_scale = 0.001
+            obj_id = 'screwdriver'
+            center_offset = 0.08  # 팁(원점) <-> 길이 중심 거리 (0.16m 길이의 절반)
+            theta_world = axis_angle - math.pi / 2
+            world_position = (x - center_offset * math.sin(theta_world),
+                              y + center_offset * math.cos(theta_world), z)
+            world_orientation_rpy = (0.0, 0.0, theta_world)
+            local_angle = axis_angle - yaw
+            theta_gripper = local_angle - math.pi / 2
+            gripper_position = (-center_offset * math.sin(theta_gripper),
+                                center_offset * math.cos(theta_gripper), 0.0)
+            gripper_orientation_rpy = (0.0, 0.0, theta_gripper)
+        else:
+            self.get_logger().error(f'미지원 TARGET_CLASS: {TARGET_CLASS}')
+            return
+
+        mesh_msg = None
         try:
-            mesh_msg = load_stl_mesh(stl_path)
-            self.spawn_attached_object('hammer', mesh_msg, x, y, z, yaw)
-            self.get_logger().info('해머 위치에 STL 스폰 완료')
+            mesh_msg = load_stl_mesh(stl_path, scale=mesh_scale)
+            self.spawn_attached_object(obj_id, mesh_msg, world_position, world_orientation_rpy)
+            self.get_logger().info(f'{TARGET_CLASS} 검출 위치에 {obj_id} STL 스폰 완료')
         except Exception as e:
             self.get_logger().error(f'STL 스폰 실패: {e}')
 
@@ -682,7 +734,7 @@ class PickYoloTarget(Node):
         if not self.gripper_command('c'):
             return
         # 그리퍼를 닫은 후, 월드(base_link)에 있던 장애물을 그리퍼 프레임으로 리어태치
-        self.attach_object_to_gripper('hammer', mesh_msg)
+        self.attach_object_to_gripper(obj_id, mesh_msg, gripper_position, gripper_orientation_rpy)
         time.sleep(0.5)
         self.move_to_joints(pregrasp_joints)
         self.get_logger().info('pick 완료')
