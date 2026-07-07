@@ -978,7 +978,7 @@ class JengaInspectorNode(Node):
         face_names = ["Front", "Right", "Back", "Left"]
         
         # 다중 각도 스윕으로 복구 (다양한 각도에서 교차 검증)
-        target_pitches = [30.0, 37.0, 45.0, 52.0]
+        target_pitches = [37.0, 45.0, 52.0, 60.0]
         face_successful_poses = {i: [] for i in range(4)}
         
         for i in range(4):
