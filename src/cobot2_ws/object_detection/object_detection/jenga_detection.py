@@ -94,6 +94,10 @@ class JengaDetectionNode(Node):
             response.message = "Color frame not available"
             return response
 
+        # 사진 이미지 상하 반전 후처리 (180도 회전) 및 확인용 명확한 로그 출력
+        self.get_logger().info("!!! [IMAGE ROTATE 180] Rotating color frame by 180 degrees (ROTATE_180) !!!")
+        color_frame = cv2.rotate(color_frame, cv2.ROTATE_180)
+
         detections = self.model.get_detections(color_frame, confidence_threshold=0.5)
         result_list = []
         
