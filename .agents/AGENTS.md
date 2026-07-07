@@ -22,4 +22,5 @@ This project is a Collaborative Robot Smart Assembly and Quality Inspection Syst
 - Set a virtual boundary/collision box (Safety Fence) in the MoveIt planning scene to protect the human operator.
 - Always write proposals and implementation plans in Korean. (제안서 및 구현 계획서는 항상 한국어로 작성합니다.)
 - Always write Git commit messages in Korean. (Git 커밋 메시지는 항상 한국어로 작성합니다.)
+- Only push to remote Git repositories when explicitly requested by the user. (Git push는 사용자가 명시적으로 요청했을 때만 수행합니다.)
 
