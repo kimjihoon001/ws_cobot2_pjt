@@ -55,7 +55,9 @@ EEF_LINK = 'rg2_tcp'
 # fixed joint로 URDF에 반영되어 있어, MoveIt이 그리퍼 손끝을 직접 목표로 잡는다.
 SPEED_SCALE = 0.1              # 낮을수록 천천히 (가상모드라도 우선 저속 유지)
 PREGRASP_Z_OFFSET = 0.15       # 물체 위 접근 높이 (m)
-GRASP_Z_CLEARANCE = 0.02       # 계산된 표면점보다 살짝 위에서 잡기
+GRASP_Z_CLEARANCE = -0.015     # 감지 z는 원통형 손잡이의 맨 윗면(카메라에 보이는 지점)이라
+                                # 반지름만큼 아래(중심축 쪽)로 내려가서 잡음. 위로 주면
+                                # 손잡이 중심보다 한참 높은 허공에서 손가락이 닫혀 놓침
 CARTESIAN_MAX_STEP = 0.01      # pregrasp -> grasp 하강 Cartesian Path 보간 간격 (m)
 
 # 특이점/조인트 리밋 회피용 미세 틸트 후보 (Roll, Pitch 오프셋, 라디안). solve_ik의
@@ -748,20 +750,17 @@ class PickYoloTarget(Node):
 
     def move_cartesian_grasp(self, x, y, z, yaw, seed_joints=None):
         """grasp 목표까지 가능하면 Cartesian Path(순수 수직)로 직선 하강.
-        실기 테스트 결과 순수 수직 경로가 특이점(IK) 근처에서 막히는 경우가 있었는데,
-        틸트로 재시도하면 경로는 살아도 grasp 순간 자세가 틀어져서(최대 10도) 실제
-        파지 위치가 어긋나 놓치는 문제가 있었음(부착 성공 로그는 그리퍼가 닫혔다는
-        뜻일 뿐 실제로 물체를 물었는지는 보장 안 함). 그래서 틸트 대신 관절공간
-        IK(자세는 순수 수직 그대로 고정)로 폴백 — 경로가 완전한 직선은 아닐 수
-        있어도 최종 자세/위치 정확도는 유지한다."""
+        실기 테스트 결과 이 지점은 순수 수직 자체가 IK로 아예 안 풀리는(도달 불가능한)
+        경우가 있어서, 순수 수직으로만 폴백하면 안 됨 — solve_ik와 동일하게 전체
+        틸트 후보(TILT_CANDIDATES)로 재시도한다."""
         grasp_pose = self.build_pose(x, y, z, yaw)
         if self.move_cartesian(grasp_pose):
             return True
 
-        self.get_logger().warn('직선 Cartesian 하강 실패 — 파지 정확도 유지를 위해 관절공간 IK로 폴백')
-        grasp_joints = self.solve_ik(x, y, z, yaw, seed_joints=seed_joints, tilts=[(0.0, 0.0)])
+        self.get_logger().warn('직선 Cartesian 하강 실패 — 관절공간 IK(틸트 후보 포함)로 폴백')
+        grasp_joints = self.solve_ik(x, y, z, yaw, seed_joints=seed_joints)
         if grasp_joints is None:
-            self.get_logger().error('grasp 포즈(순수 수직)에 대한 IK 해를 찾지 못했습니다.')
+            self.get_logger().error('grasp 포즈에 대한 IK 해를 찾지 못했습니다.')
             return False
         return self.move_to_joints(grasp_joints)
 
@@ -885,8 +884,10 @@ class PickYoloTarget(Node):
             stl_path = '/home/rokey/ws_cobot2_pjt/src/cobot2_ws/m0609_rg2_bringup/meshes/screwdriver.stl'
             mesh_scale = 0.001
             obj_id = 'screwdriver'
+            # 실기 확인 결과 팁/버트 방향이 반대로 나와서 180도 추가 — 원형 단면이라
+            # 요(Z축)만 더 돌리면 되고 다른 계산(오프셋 등)엔 영향 없음.
             world_position, world_quat, gripper_position, gripper_quat = compute_attach_pose(
-                flatten_roll=0.0, flatten_pitch=0.0, world_yaw_offset=-math.pi / 2,
+                flatten_roll=0.0, flatten_pitch=0.0, world_yaw_offset=math.pi / 2,
                 native_offset=(0.0, -0.08, 0.0), axis_angle=axis_angle, yaw=yaw,
                 detected_xyz=(x, y, z))
         else:
