@@ -41,91 +41,53 @@ source install/setup.bash
 
 ---
 
-## 💻 1. 가상 환경 (Virtual Mode) 실행 방법
-실제 로봇 연결 없이 PC 시뮬레이션 환경에서 연동 및 회피 경로 생성을 검증하는 방법입니다.
+## 🦾 1. YOLO 공구 인식 및 자동 파지 시스템 실행 방법
 
-### 터미널 1: RealSense 카메라 구동
-```bash
-realsense
-```
-
-### 터미널 2: 가상 로봇 드라이버 및 RViz 기동
-```bash
-source ~/ws_cobot2_pjt/install/setup.bash
-ros2 launch m0609_rg2_bringup bringup_camera.launch.py mode:=virtual
-```
-*(로봇 하단에 설치된 실제 사이즈의 회색 작업대 테이블이 함께 로드됩니다.)*
-
-### 터미널 3: MoveIt 모션 플래너 기동
-```bash
-source ~/ws_cobot2_pjt/install/setup.bash
-ros2 launch m0609_rg2_moveit movegroup_only.launch.py
-```
-
-### 터미널 4: YOLOv8 비전 노드 실행 (GPU/CUDA 가속)
-```bash
-source ~/ws_cobot2_pjt/install/setup.bash
-ros2 run object_detection object_detection
-```
-*(기동 시 `YOLO initialized on device: cuda` 문구가 나타납니다.)*
-
-### 터미널 5: 장애물 변환 및 지속 기억 노드 실행
-```bash
-source ~/ws_cobot2_pjt/install/setup.bash
-ros2 run object_detection tool_obstacle_publisher --ros-args -p target_tool:=screwdriver
-```
-*(감지 상실 시에도 4.0초간 최종 손 위치를 유지하여 회피 기동을 보장합니다.)*
-
-### 터미널 6: 왕복 모션 및 회피 루프 실행
-```bash
-source ~/ws_cobot2_pjt/install/setup.bash
-python3 src/cobot2_ws/m0609_rg2_bringup/scripts/hand_avoidance.py
-```
-
----
-
-## 🦾 2. 실제 로봇 환경 (Real Mode) 실행 방법
-실제 Doosan m0609 로봇(IP: `192.168.1.100`) 하드웨어에 직결하여 비전 회피 및 조작을 기동하는 방법입니다.
+YOLO + RealSense 깊이 카메라로 해머를 감지하고, MoveIt 관절 공간 제어(Joint Space Control)로 자동 파지 후 들어 올리는 시스템입니다.
 
 > [!IMPORTANT]
-> **준비 사항**: PC와 두산 로봇 컨트롤러는 반드시 **유선 랜선(이더넷)**으로 연결되어 있어야 제어 지연이 생기지 않습니다.
+> **준비 사항**: PC와 두산 로봇 컨트롤러는 반드시 **유선 랜선(이더넷)**으로 연결되어 있어야 합니다. 로봇 펜던트의 동작 모드는 **자동(Auto)** 상태로 설정해 주세요.
 
 ### 터미널 1: RealSense 카메라 구동
 ```bash
 realsense
 ```
+*(`/camera/camera/color/image_raw` 및 `/camera/camera/aligned_depth_to_color/image_raw` 토픽이 발행되어야 합니다.)*
 
 ### 터미널 2: 실제 로봇 드라이버 기동 (IP: 192.168.1.100)
 ```bash
-source ~/ws_cobot2_pjt/install/setup.bash
+cd ~/ws_cobot2_pjt && source install/setup.bash
 ros2 launch m0609_rg2_bringup bringup_camera.launch.py mode:=real host:=192.168.1.100
 ```
+*(가상 시뮬레이션만 하는 경우: `mode:=virtual`로 변경)*
 
 ### 터미널 3: MoveIt 모션 플래너 기동
 ```bash
-source ~/ws_cobot2_pjt/install/setup.bash
+cd ~/ws_cobot2_pjt && source install/setup.bash
 ros2 launch m0609_rg2_moveit movegroup_only.launch.py
 ```
 
-### 터미널 4: YOLOv8 비전 노드 실행 (GPU 가속)
+### 터미널 4: OnRobot RG2 그리퍼 드라이버 기동
 ```bash
-source ~/ws_cobot2_pjt/install/setup.bash
-ros2 run object_detection object_detection
+cd ~/ws_cobot2_pjt && source install/setup.bash
+ros2 launch onrobot_rg_ros2 bringup.launch.py ip:=192.168.1.1
 ```
 
-### 터미널 5: 장애물 변환 및 지속 기억 노드 실행
+### 터미널 5: YOLO 파지 스크립트 실행
 ```bash
-source ~/ws_cobot2_pjt/install/setup.bash
-ros2 run object_detection tool_obstacle_publisher --ros-args -p target_tool:=screwdriver
+cd ~/ws_cobot2_pjt && source install/setup.bash
+python3 src/cobot2_ws/m0609_rg2_bringup/scripts/tool_pick_yolo_target.py
 ```
 
-### 터미널 6: 왕복 모션 및 회피 루프 실행
-```bash
-source ~/ws_cobot2_pjt/install/setup.bash
-python3 src/cobot2_ws/m0609_rg2_bringup/scripts/hand_avoidance.py
-```
+실행 흐름:
+1. 카메라로 `tool-hammer` 클래스를 탐지 (신뢰도 0.7 이상)
+2. 깊이 센서로 실제 3D 좌표(`base_link` 기준) 계산
+3. MoveIt Planning Scene에 해머 STL 메쉬를 장애물로 스폰
+4. 관절 공간 IK(Joint Space Control)로 pregrasp → grasp 이동
+5. RG2 그리퍼 닫기 → 파지 완료 → 들어 올리기 (pregrasp 복귀)
 
 ---
+
 
 ## 🧱 3. 젠가 불량 검사 및 실시간 손 회피 시스템 실행 방법 (Real Mode)
 실제 로봇 환경에서 YOLOv8 및 RealSense 카메라를 결합한 젠가 불량 검사 시퀀스(측정 각도 30°, 37°, 45°, 52°, 60° 다중 촬영 및 최적 2면 선정)를 기동하고, 동작 중 ROI 기반의 손 회피 기능까지 연동하여 작동시키는 가이드입니다.
