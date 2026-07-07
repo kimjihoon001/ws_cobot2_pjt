@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 
-from pymodbus.client.sync import ModbusTcpClient as ModbusClient
+try:
+    from pymodbus.client import ModbusTcpClient as ModbusClient
+except ImportError:
+    from pymodbus.client.sync import ModbusTcpClient as ModbusClient
 
 
 class RG():
