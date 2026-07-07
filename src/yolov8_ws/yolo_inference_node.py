@@ -56,7 +56,7 @@ class YoloInferenceNode(Node):
         self.VELOCITY = 60
         self.ACC = 60
         self.FIXED_DISTANCE = 300.0
-        self.FIXED_PITCH = 45.0
+        self.current_pitch_deg = 45.0
         self.current_yaw = None
         
         self.robot_lock = threading.Lock()
@@ -71,6 +71,7 @@ class YoloInferenceNode(Node):
         self.get_logger().info(' 1   : right_back (-135도) 이동')
         self.get_logger().info(' 2   : right_front (-45도) 이동')
         self.get_logger().info(' 3   : left_front (45도) 이동')
+        self.get_logger().info(' 4/5/6: 피치(내려다보는 각도)를 30/45/60도로 변경')
         self.get_logger().info(' ESC : 프로그램 종료')
         self.get_logger().info('=========================================')
 
@@ -161,9 +162,9 @@ class YoloInferenceNode(Node):
         from DSR_ROBOT2 import movel, movec, mwait
         
         self.is_moving = True
-        self.get_logger().info(f"==> {name} (각도: {target_yaw}도) 위치로 이동합니다...")
+        self.get_logger().info(f"==> {name} (각도: {target_yaw}도, 피치: {self.current_pitch_deg}도) 위치로 이동합니다...")
         
-        pos_target = self.get_spherical_pose(target_yaw, self.FIXED_PITCH, self.FIXED_DISTANCE)
+        pos_target = self.get_spherical_pose(target_yaw, self.current_pitch_deg, self.FIXED_DISTANCE)
         
         try:
             if self.current_yaw is None or self.current_yaw == target_yaw:
@@ -171,7 +172,7 @@ class YoloInferenceNode(Node):
                     movel(pos_target, vel=self.VELOCITY, acc=self.ACC)
             else:
                 via_yaw = (self.current_yaw + target_yaw) / 2.0
-                pos_via = self.get_spherical_pose(via_yaw, self.FIXED_PITCH, self.FIXED_DISTANCE)
+                pos_via = self.get_spherical_pose(via_yaw, self.current_pitch_deg, self.FIXED_DISTANCE)
                 with self.robot_lock:
                     movec(pos_via, pos_target, vel=self.VELOCITY, acc=self.ACC)
                 
@@ -249,43 +250,35 @@ def main(args=None):
                             if valid_entire_Z == float('inf'):
                                 entire_v_depth = None
                             else:
-                                entire_v_depth = node.get_vertical_depth(valid_eu, valid_ev, valid_entire_Z, pitch_deg=node.FIXED_PITCH)
+                                entire_v_depth = node.get_vertical_depth(valid_eu, valid_ev, valid_entire_Z, pitch_deg=node.current_pitch_deg)
                             
                             if entire_v_depth is None:
                                 node.get_logger().warn(f"entire 박스 중심({eu}, {ev})의 깊이값이 유효하지 않습니다. (노이즈)")
                             else:
                                 # 기준점(entire 중심) 화면에 파란색 원으로 표시
                                 cv2.circle(annotated_frame, (valid_eu, valid_ev), 7, (255, 0, 0), -1)
+                                # 수학적 평면 교차(Ray-Plane Intersection)를 위한 타워 전면부 평면 상수(K) 계산
+                                # 카메라 프레임에서 가상의 수직 평면 방정식: -sin(theta)*X - cos(theta)*Z = K
+                                theta = np.radians(node.current_pitch_deg)
+                                fx = node.intrinsics['fx']
+                                ppx = node.intrinsics['ppx']
                                 
-                                # 3. 각 'hole'들의 상대 높이 및 층수 차이 계산
+                                X_ent_c = (valid_eu - ppx) * valid_entire_Z / fx
+                                K = -np.sin(theta) * X_ent_c - np.cos(theta) * valid_entire_Z
+                                
+                                # 3. 각 'hole'들의 절대 높이 수학적 추정 및 층수 차이 계산
                                 for idx, box in enumerate(hole_boxes):
                                     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                                     u = int((x1 + x2) / 2)
                                     v = int((y1 + y2) / 2)
                                     
-                                    # 화면이 누워있으므로, 구멍의 위/아래(화면상 세로 v축)를 스캔하여 블록 앞면을 찾습니다.
-                                    valid_Z_candidates = []
-                                    valid_v_candidates = []
+                                    # 구멍의 픽셀(u)을 지나는 카메라 광선(Ray)이 가상의 수직 평면과 만나는 Z 깊이 계산
+                                    denom = -np.sin(theta) * (u - ppx) / fx - np.cos(theta)
                                     
-                                    scan_y_start = int(y1) - 20
-                                    scan_y_end = int(y2) + 20
-                                    
-                                    for scan_v in range(scan_y_start, scan_y_end + 1, 5):
-                                        tu = np.clip(u, 0, node.depth_frame.shape[1]-1)
-                                        tv = np.clip(scan_v, 0, node.depth_frame.shape[0]-1)
-                                        val = float(node.depth_frame[tv, tu])
-                                        if val > 0:
-                                            valid_Z_candidates.append(val)
-                                            valid_v_candidates.append(tv)
-                                            
-                                    if len(valid_Z_candidates) > 0:
-                                        # 가장 Z값이 작은(카메라에 가까운) 픽셀이 해당 층의 '진짜 블록 앞면'입니다.
-                                        min_idx = np.argmin(valid_Z_candidates)
-                                        obj_Z = valid_Z_candidates[min_idx]
-                                        valid_v = valid_v_candidates[min_idx]
-                                        valid_u = u
-                                        
-                                        obj_v_depth = node.get_vertical_depth(valid_u, valid_v, obj_Z, pitch_deg=node.FIXED_PITCH)
+                                    if abs(denom) > 1e-6:
+                                        # 스캔 없이 수학적으로 도출된 구멍의 완벽한 표면 깊이
+                                        Z_hole_true = K / denom
+                                        obj_v_depth = node.get_vertical_depth(u, v, Z_hole_true, pitch_deg=node.current_pitch_deg)
                                     else:
                                         obj_v_depth = None
                                         
@@ -311,7 +304,7 @@ def main(args=None):
                                         node.get_logger().info(f"[Hole {idx+1}] 위치: {horiz_pos} / 상대 층수: {floor_diff:+}층 / 오차: {relative_height:+.1f}mm")
                                         
                                         # 화면에 중심점(빨간색 원)과 측정된 위치, 층수 출력
-                                        cv2.circle(annotated_frame, (valid_u, valid_v), 5, (0, 0, 255), -1)
+                                        cv2.circle(annotated_frame, (u, v), 5, (0, 0, 255), -1)
                                         cv2.putText(annotated_frame, f"{horiz_pos} {floor_diff:+}F", (u+10, v-10),
                                                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                                     else:
@@ -352,17 +345,50 @@ def main(args=None):
                     if node.is_manual_mode:
                         node.get_logger().warn("수동 제어를 끄고 이동해주세요.")
                     elif not node.is_moving:
+                        node.is_moving = True
                         threading.Thread(target=node.move_routine, args=(-135, 'right_back')).start()
                 elif key == ord('2'):
                     if node.is_manual_mode:
                         node.get_logger().warn("수동 제어를 끄고 이동해주세요.")
                     elif not node.is_moving:
+                        node.is_moving = True
                         threading.Thread(target=node.move_routine, args=(-45, 'right_front')).start()
                 elif key == ord('3'):
                     if node.is_manual_mode:
                         node.get_logger().warn("수동 제어를 끄고 이동해주세요.")
                     elif not node.is_moving:
+                        node.is_moving = True
                         threading.Thread(target=node.move_routine, args=(45, 'left_front')).start()
+                        
+                elif key == ord('4') or key in [ord('q'), ord('Q')]:
+                    if node.is_manual_mode:
+                        node.get_logger().warn("수동 제어를 끄고 조작해주세요.")
+                    elif not node.is_moving:
+                        node.current_pitch_deg = 30.0
+                        node.get_logger().info("피치 각도를 30도로 변경했습니다.")
+                        if node.current_yaw is not None:
+                            node.is_moving = True
+                            threading.Thread(target=node.move_routine, args=(node.current_yaw, f'pitch_30_yaw_{node.current_yaw}')).start()
+                            
+                elif key == ord('5') or key in [ord('w'), ord('W')]:
+                    if node.is_manual_mode:
+                        node.get_logger().warn("수동 제어를 끄고 조작해주세요.")
+                    elif not node.is_moving:
+                        node.current_pitch_deg = 45.0
+                        node.get_logger().info("피치 각도를 45도로 변경했습니다.")
+                        if node.current_yaw is not None:
+                            node.is_moving = True
+                            threading.Thread(target=node.move_routine, args=(node.current_yaw, f'pitch_45_yaw_{node.current_yaw}')).start()
+                            
+                elif key == ord('6') or key in [ord('e'), ord('E')]:
+                    if node.is_manual_mode:
+                        node.get_logger().warn("수동 제어를 끄고 조작해주세요.")
+                    elif not node.is_moving:
+                        node.current_pitch_deg = 60.0
+                        node.get_logger().info("피치 각도를 60도로 변경했습니다.")
+                        if node.current_yaw is not None:
+                            node.is_moving = True
+                            threading.Thread(target=node.move_routine, args=(node.current_yaw, f'pitch_60_yaw_{node.current_yaw}')).start()
                 
                 try:
                     result_msg = node.bridge.cv2_to_imgmsg(annotated_frame, "bgr8")
