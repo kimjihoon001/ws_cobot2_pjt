@@ -6,19 +6,11 @@ import sqlite3
 import threading
 
 import numpy as np
-import cv2
-from cv_bridge import CvBridge
 import trimesh
 from scipy.spatial.transform import Rotation
 
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import Image, CameraInfo
-try:
-    from ultralytics import YOLO
-except ImportError:
-    pass
-
 from tf2_ros import Buffer, TransformListener
 from ament_index_python.packages import get_package_share_directory
 from std_srvs.srv import Trigger
@@ -90,39 +82,6 @@ class JengaInspectorNode(Node):
         super().__init__("jenga_inspector")
         self.package_path = get_package_share_directory("robot_control")
         self.init_database()
-        
-        # YOLO init
-        model_path = '/home/rokey/cobot_ws/src/ws_cobot2_pjt/src/yolov8_ws/model/best_3.onnx'
-        if not os.path.exists(model_path):
-            model_path = '/home/rokey/cobot_ws/src/ws_cobot2_pjt/src/yolov8_ws/model/best_2.onnx'
-        self.model = YOLO(model_path, task='detect')
-        
-        self.bridge = CvBridge()
-        self.latest_image = None
-        self.depth_frame = None
-        self.intrinsics = None
-        self.inspection_data = {}
-        self.current_pitch_deg = 45.0
-        
-        self.REFERENCE_TEMPLATES = {
-            1: [
-                ('Left', 1), ('Center', 1),
-                ('Right', 3),
-                ('Left', 5), ('Right', 5)
-            ],
-            2: [
-                ('Right', 2),
-                ('Left', 4), ('Right', 4),
-                ('Center', 6)
-            ]
-        }
-
-        from rclpy.callback_groups import ReentrantCallbackGroup
-        cb_group = ReentrantCallbackGroup()
-        self.image_sub = self.create_subscription(Image, '/camera/camera/color/image_raw', self.image_callback, 10, callback_group=cb_group)
-        self.depth_sub = self.create_subscription(Image, '/camera/camera/aligned_depth_to_color/image_raw', self.depth_callback, 10, callback_group=cb_group)
-        self.info_sub = self.create_subscription(CameraInfo, '/camera/camera/color/camera_info', self.info_callback, 10, callback_group=cb_group)
-        self.image_pub = self.create_publisher(Image, '/yolo/result_image', 10)
 
         # Helper node for blocking action and service calls to prevent executor deadlock
         self.action_node = rclpy.create_node("jenga_inspector_action_node")
@@ -178,175 +137,6 @@ class JengaInspectorNode(Node):
         )
         
         self.get_logger().info("JengaInspectorNode initialized. Service '/run_jenga_inspection' is ready.")
-
-    def info_callback(self, msg):
-        if self.intrinsics is None:
-            self.intrinsics = {"fx": msg.k[0], "fy": msg.k[4], "ppx": msg.k[2], "ppy": msg.k[5]}
-
-    def image_callback(self, msg):
-        try:
-            self.latest_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
-        except Exception:
-            pass
-
-    def depth_callback(self, msg):
-        try:
-            self.depth_frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
-        except Exception:
-            pass
-
-    def get_vertical_depth(self, u, v, Z_c, pitch_deg=45.0):
-        if Z_c <= 0 or self.intrinsics is None:
-            return None
-        theta = np.radians(90.0 - pitch_deg)
-        fx = self.intrinsics['fx']
-        ppx = self.intrinsics['ppx']
-        X_c = (u - ppx) * Z_c / fx
-        virtual_Y_c = -X_c
-        return Z_c * np.sin(theta) + virtual_Y_c * np.cos(theta)
-
-    def capture_single_frame(self, face_name, pitch_deg):
-        self.get_logger().info(f"[{face_name}] 각도 {pitch_deg}°에서 1프레임 캡처 중...")
-        if self.latest_image is None or self.depth_frame is None or self.intrinsics is None:
-            self.get_logger().warn("카메라 데이터를 기다리는 중...")
-            time.sleep(0.5)
-            return []
-        
-        frame_results = []
-        img_copy = self.latest_image.copy()
-        results = self.model(img_copy, conf=0.20, verbose=False)
-        
-        if len(results) > 0:
-            res = results[0]
-            annotated_frame = res.plot()
-            
-            # 이미지 저장 (디버깅/보고용)
-            save_dir = os.path.join(os.path.expanduser('~'), 'inspection_images')
-            os.makedirs(save_dir, exist_ok=True)
-            timestamp = int(time.time() * 1000)
-            filename = os.path.join(save_dir, f"inspection_{face_name}_{pitch_deg}_{timestamp}.jpg")
-            cv2.imwrite(filename, annotated_frame)
-            
-            try:
-                img_msg = self.bridge.cv2_to_imgmsg(annotated_frame, "bgr8")
-                self.image_pub.publish(img_msg)
-            except Exception:
-                pass
-            
-            names = res.names
-            entire_box = None
-            hole_boxes = []
-            
-            for box in res.boxes:
-                cls_name = names[int(box.cls[0])]
-                if cls_name == 'entire':
-                    entire_box = box
-                elif cls_name.lower() == 'smallhole':
-                    hole_boxes.append(box)
-            
-            if entire_box is not None:
-                ex1, ey1, ex2, ey2 = entire_box.xyxy[0].cpu().numpy()
-                eu = int((ex1 + ex2) / 2)
-                ev = int((ey1 + ey2) / 2)
-                
-                valid_entire_Z = float('inf')
-                valid_eu, valid_ev = eu, ev
-                
-                scan_ey_start = int(ey1) + 10
-                scan_ey_end = int(ey2) - 10
-                
-                for scan_v in range(scan_ey_start, scan_ey_end + 1, 5):
-                    tu = np.clip(eu, 0, self.depth_frame.shape[1]-1)
-                    tv = np.clip(scan_v, 0, self.depth_frame.shape[0]-1)
-                    val = float(self.depth_frame[tv, tu])
-                    if 0 < val < valid_entire_Z:
-                        valid_entire_Z = val
-                        valid_eu, valid_ev = tu, tv
-                
-                if valid_entire_Z != float('inf'):
-                    entire_v_depth = self.get_vertical_depth(valid_eu, valid_ev, valid_entire_Z, pitch_deg=pitch_deg)
-                    if entire_v_depth is not None:
-                        theta = np.radians(90.0 - pitch_deg)
-                        fx = self.intrinsics['fx']
-                        ppx = self.intrinsics['ppx']
-                        
-                        X_ent_c = (valid_eu - ppx) * valid_entire_Z / fx
-                        K = -np.sin(theta) * X_ent_c - np.cos(theta) * valid_entire_Z
-                        
-                        denom_base = -np.sin(theta) * (ex1 - ppx) / fx - np.cos(theta)
-                        if abs(denom_base) > 1e-6:
-                            Z_base_true = K / denom_base
-                            base_v_depth = self.get_vertical_depth(ex1, ev, Z_base_true, pitch_deg=pitch_deg)
-                        else:
-                            base_v_depth = entire_v_depth
-                        
-                        for box in hole_boxes:
-                            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                            u = int((x1 + x2) / 2)
-                            v = int((y1 + y2) / 2)
-                            
-                            denom = -np.sin(theta) * (u - ppx) / fx - np.cos(theta)
-                            if abs(denom) > 1e-6:
-                                Z_hole_true = K / denom
-                                obj_v_depth = self.get_vertical_depth(u, v, Z_hole_true, pitch_deg=pitch_deg)
-                                if obj_v_depth is not None:
-                                    height_from_base = base_v_depth - obj_v_depth
-                                    compensated_height = height_from_base - 7.0
-                                    floor_num = max(1, int(round(compensated_height / 14.0)) + 1)
-                                    
-                                    tower_width = ey2 - ey1
-                                    third = tower_width / 3.0
-                                    if v < ey1 + third:
-                                        horiz_pos = "Left"
-                                    elif v < ey1 + 2 * third:
-                                        horiz_pos = "Center"
-                                    else:
-                                        horiz_pos = "Right"
-                                        
-                                    frame_results.append((floor_num, horiz_pos))
-        return frame_results
-
-    def analyze_defects(self):
-        self.get_logger().info("===== 최종 검사 및 패턴 매칭 =====")
-        jenga_map = {floor: ["O", "O", "O"] for floor in range(6, 0, -1)}
-        
-        pos_to_idx = {"Left": 0, "Center": 1, "Right": 2}
-        
-        detected_features = {1: [], 2: []}
-        
-        if 1 in self.inspection_data:
-            for floor, pos in self.inspection_data[1]:
-                if floor % 2 != 0 and 1 <= floor <= 6:
-                    jenga_map[floor][pos_to_idx[pos]] = "X"
-                    detected_features[1].append((pos, floor))
-        
-        if 2 in self.inspection_data:
-            for floor, pos in self.inspection_data[2]:
-                if floor % 2 == 0 and 1 <= floor <= 6:
-                    jenga_map[floor][pos_to_idx[pos]] = "X"
-                    detected_features[2].append((pos, floor))
-                    
-        for k in detected_features:
-            detected_features[k] = sorted(detected_features[k], key=lambda x: x[1])
-
-        print("\n================ Jenga 6-Floor Map ================")
-        print("  [Floor]  [Left]  [Center]  [Right]")
-        for floor in range(6, 0, -1):
-            print(f"  Floor {floor}:   {jenga_map[floor][0]}        {jenga_map[floor][1]}         {jenga_map[floor][2]}")
-        print("===================================================\n")
-        
-        product_type = "불량품 (알 수 없는 패턴)"
-        is_pass = False
-        
-        match_type1 = (detected_features[1] == sorted(self.REFERENCE_TEMPLATES[1], key=lambda x: x[1]))
-        match_type2 = (detected_features[2] == sorted(self.REFERENCE_TEMPLATES[2], key=lambda x: x[1]))
-        
-        if match_type1 and match_type2:
-            product_type = "정상 양품 (Type A)"
-            is_pass = True
-            
-        print(f"-> 최종 판정 결과: {product_type}")
-        return is_pass
 
     def hand_position_callback(self, msg):
         """Processes hand position, filters by robot workspace ROI, and updates obstacle."""
@@ -946,11 +736,11 @@ class JengaInspectorNode(Node):
         spawn_z = p_base[2] - 42.0
         self.spawn_jenga_mesh(p_base[0], p_base[1], spawn_z, yaw_base)
   
-        # 4. Generate scanning viewpoints around the Jenga block using Spherical coordinates
+        # 4. Generate 4 scanning viewpoints around the Jenga block using Spherical coordinates
         p_target = [p_base[0], p_base[1], p_base[2] - 42.0]
         face_names = ["Front", "Right", "Back", "Left"]
         
-        # 다중 각도 스윕으로 복구 (다양한 각도에서 교차 검증)
+        # 측정 각도 확장 설정
         target_pitches = [30.0, 37.0, 45.0, 52.0, 60.0]
         face_successful_poses = {i: [] for i in range(4)}
         
@@ -970,67 +760,67 @@ class JengaInspectorNode(Node):
                 else:
                     self.get_logger().warn(f"IK solution FAILED for {face_names[i]} Face at Pitch {p}°")
 
-        # 6층 맵 패턴 매칭을 위해 면1(Right)과 면2(Back)를 스캔
-        # 만약 둘 중 하나라도 IK가 실패하면 인접한 다른 2면을 찾음
-        if len(face_successful_poses[1]) > 0 and len(face_successful_poses[2]) > 0:
-            best_pair = (1, 2)
-        else:
-            adjacent_pairs = [(0, 1), (1, 2), (2, 3), (3, 0)]
-            best_pair = None
-            for idx1, idx2 in adjacent_pairs:
-                if len(face_successful_poses[idx1]) > 0 and len(face_successful_poses[idx2]) > 0:
-                    best_pair = (idx1, idx2)
-                    break
-
-        if best_pair is None:
-            self.get_logger().error("No valid IK poses found for any adjacent faces. Aborting inspection.")
+        # 2면이 연속되면서 가장 많은 사진을 찍을 수 있는 2면 선택
+        adjacent_pairs = [(0, 1), (1, 2), (2, 3), (3, 0)]
+        best_score = -1
+        best_pair = None
+        
+        for idx1, idx2 in adjacent_pairs:
+            score = len(face_successful_poses[idx1]) + len(face_successful_poses[idx2])
+            if score > best_score:
+                best_score = score
+                best_pair = (idx1, idx2)
+                
+        if best_pair is None or best_score == 0:
+            self.get_logger().error("No valid IK poses found on any face. Aborting inspection.")
             response.success = False
             response.message = "Failed to find any valid IK configurations"
             return
             
         idx1, idx2 = best_pair
-        self.get_logger().info(f"Selected Adjacent Faces for 6-Floor Map: {face_names[idx1]} and {face_names[idx2]}")
+        self.get_logger().info(f"Selected Best Adjacent Faces: {face_names[idx1]} and {face_names[idx2]} with total {best_score} poses.")
 
+        # 평탄화된 타겟 리스트 구성
         scan_targets = []
         for p, joints in face_successful_poses[idx1]:
             scan_targets.append((idx1, face_names[idx1], p, joints))
         for p, joints in face_successful_poses[idx2]:
             scan_targets.append((idx2, face_names[idx2], p, joints))
 
-        self.inspection_data = {}
-        face_results_buffer = {idx1: [], idx2: []}
+        inspection_failed = False
+        failed_reasons = []
+        overall_confidence_list = []
+        inspection_reports = [] # 최종 요약 보고서 저장용
 
         # Iterate targets with safety loop
         target_idx = 0
         while target_idx < len(scan_targets):
             face_idx, face_name, pitch_deg, joint_angles = scan_targets[target_idx]
-            self.current_pitch_deg = pitch_deg
             self.get_logger().info(f"Moving to Scan Position: {face_name} Face, Pitch {pitch_deg}°...")
             
             # Try to move to the scan position
             success = self.move_to_joints_moveit(joint_angles)
             if not success:
                 if self.hand_detected:
-                    self.get_logger().warn(f"Hand detected while moving to {face_name} Face! Initiating safety evasion...")
+                    self.get_logger().warn(f"Hand detected while moving to {face_name} Face, Pitch {pitch_deg}°! Initiating safety evasion...")
                     self.execute_safety_evasion()
                     
                     self.get_logger().warn("Waiting for hand to clear before resuming scan...")
                     while rclpy.ok() and self.hand_detected:
                         time.sleep(0.5)
                         
-                    self.get_logger().info(f"Hand cleared. Resuming scan of {face_name} Face (retrying same position)...")
+                    self.get_logger().info(f"Hand cleared. Resuming scan of {face_name} Face, Pitch {pitch_deg}° (retrying same position)...")
                     continue
                 else:
-                    self.get_logger().error(f"Failed to move to {face_name} Face due to non-safety reasons. Skipping.")
+                    self.get_logger().error(f"Failed to move to {face_name} Face, Pitch {pitch_deg}° due to non-safety reasons. Skipping.")
                     target_idx += 1
                     continue
 
-            self.get_logger().info("카메라 앵글 흔들림 보정을 위해 1.5초 대기 후 자동 촬영을 시작합니다...")
-            time.sleep(1.5) # Settle camera
+            time.sleep(1.0) # Settle camera
 
             # Double check if hand was detected during settling time
             if self.hand_detected:
-                self.get_logger().warn(f"Hand detected right after arrival at {face_name} Face! Evading...")
+                self.get_logger().warn(f"Hand detected right after arrival at {face_name} Face, Pitch {pitch_deg}°! Evading...")
                 self.execute_safety_evasion()
                 self.get_logger().warn("Waiting for hand to clear before resuming scan...")
                 while rclpy.ok() and self.hand_detected:
@@ -1038,32 +828,113 @@ class JengaInspectorNode(Node):
                 self.get_logger().info("Hand cleared. Resuming scan...")
                 continue
 
-            # 단일 프레임 직접 캡처 및 깊이 역산
-            holes = self.capture_single_frame(face_name, pitch_deg)
-            face_results_buffer[face_idx].extend(holes)
+            # Run YOLO feature detection
+            if not self.detect_features_client.wait_for_service(timeout_sec=3.0):
+                self.get_logger().error("Service /detect_jenga_features not available")
+                target_idx += 1
+                continue
+
+            detect_req = Trigger.Request()
+            detect_future = self.detect_features_client.call_async(detect_req)
+            
+            # Wait for perception to finish or check hand intrusion
+            while rclpy.ok() and not detect_future.done():
+                if self.hand_detected:
+                    break
+                time.sleep(0.1)
+                
+            if self.hand_detected:
+                self.get_logger().warn(f"Hand detected during feature detection on {face_name} Face, Pitch {pitch_deg}°! Evading...")
+                self.execute_safety_evasion()
+                self.get_logger().warn("Waiting for hand to clear...")
+                while rclpy.ok() and self.hand_detected:
+                    time.sleep(0.5)
+                self.get_logger().info("Hand cleared. Resuming...")
+                continue
+
+            detect_res = detect_future.result()
+            if not detect_res or not detect_res.success:
+                self.get_logger().warn(f"Failed to detect features on {face_name} Face, Pitch {pitch_deg}°.")
+                target_idx += 1
+                continue
+
+            # Parse JSON features
+            try:
+                features = json.loads(detect_res.message)
+            except Exception as e:
+                self.get_logger().error(f"Failed to parse JSON features: {e}")
+                target_idx += 1
+                continue
+
+            # Count classes detected
+            counts = {"smallhole": 0, "longhole": 0, "entire": 0}
+            face_confidences = []
+            for f in features:
+                name = f["name"]
+                if name in counts:
+                    counts[name] += 1
+                face_confidences.append(f["score"])
+
+            avg_conf = np.mean(face_confidences) if face_confidences else 1.0
+            overall_confidence_list.append(avg_conf)
+
+            # Validate against EXPECTED_FEATURES
+            expected = EXPECTED_FEATURES[face_idx]
+            
+            # 실시간 정상/불량 판정 계산 (이 시점의 판정)
+            is_face_pass = (counts["smallhole"] == expected["smallhole"]) and (counts["longhole"] == expected["longhole"])
+            face_status_str = "정상 (PASS)" if is_face_pass else "불량 (FAIL)"
+            if not is_face_pass:
+                inspection_failed = True
+                failed_reasons.append(
+                    f"{face_name} Face at Pitch {pitch_deg}° wrong hole counts: "
+                    f"small={counts['smallhole']} (expected {expected['smallhole']}), "
+                    f"long={counts['longhole']} (expected {expected['longhole']})"
+                )
+
+            # 실시간 촬영 및 판정 결과 터미널 강제 출력
+            report_msg = (
+                f"\n=================================================="
+                f"\n[실시간 촬영 및 판정 리포트]"
+                f"\n  - 촬영 면 (Face)   : {face_name} 면"
+                f"\n  - 촬영 각도 (Pitch) : {pitch_deg} 도"
+                f"\n  - 판정 결과 (Status): {face_status_str}"
+                f"\n  - 검출 정보 (Details): 감지={counts} | 기준={expected}"
+                f"\n==================================================\n"
+            )
+            self.get_logger().info(report_msg)
+            print(report_msg, flush=True)
+
+            # 요약 보고서용 데이터 누적
+            inspection_reports.append((face_name, pitch_deg, face_status_str, counts))
 
             # Move on to next target
             target_idx += 1
 
-        # 모든 캡처 종료 후 다중 각도 필터링 수행
-        from collections import Counter
-        for f_idx in face_results_buffer:
-            face_name_str = face_names[f_idx]
-            counter = Counter(face_results_buffer[f_idx])
+        # 5. Determine overall inspection result and log to SQLite
+        final_result = "FAIL" if inspection_failed else "PASS"
+        avg_overall_confidence = np.mean(overall_confidence_list) if overall_confidence_list else 0.0
+        
+        # 최종 완료 요약 보고서 터미널 강제 출력
+        summary_msg = (
+            f"\n=================================================="
+            f"\n[젠가 불량 검사 최종 완료 요약 보고서]"
+            f"\n--------------------------------------------------"
+            f"\n  * 최종 판정 결과 : {final_result}"
+            f"\n  * 평균 검출 신뢰도: {avg_overall_confidence:.4f}"
+            f"\n  * 상세 촬영 요약  :"
+        )
+        for idx, (face, pitch, status, cnt) in enumerate(inspection_reports):
+            summary_msg += f"\n    - [{idx+1}/{len(inspection_reports)}] {face} 면 (각도 {pitch}°): {status} | 감지={cnt}"
             
-            # 5번의 각도 중 최소 2개 각도 이상에서 보이면 실제 구멍으로 인정 (더 견고한 필터링)
-            final_holes = [hole for hole, count in counter.items() if count >= 2]
-            self.get_logger().info(f"[{face_name_str}] 면 다중 각도 종합 필터링된 최종 구멍: {final_holes}")
-            
-            if f_idx == 1:
-                self.inspection_data[1] = final_holes
-            elif f_idx == 2:
-                self.inspection_data[2] = final_holes
-
-        # 5. Analyze defects (Build 6-floor map and match patterns)
-        is_pass = self.analyze_defects()
-        final_result = "PASS" if is_pass else "FAIL"
-        avg_overall_confidence = 1.0
+        if inspection_failed:
+            summary_msg += f"\n  * 불량 검출 세부 사유:"
+            for reason in failed_reasons:
+                summary_msg += f"\n    - {reason}"
+        summary_msg += f"\n==================================================\n"
+        
+        self.get_logger().info(summary_msg)
+        print(summary_msg, flush=True)
 
         self.log_result_to_db(final_result, avg_overall_confidence)
 
