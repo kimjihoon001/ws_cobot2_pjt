@@ -210,7 +210,8 @@ def main(args=None):
                 node.new_image_available = False
                 node.last_inference_time = current_time
                 
-                results = node.model(node.latest_image, verbose=False)
+                # confidence threshold를 0.20으로 낮춰 탐지율을 높임
+                results = node.model(node.latest_image, conf=0.20, verbose=False)
                 annotated_frame = results[0].plot()
                 
                 if node.is_moving:
