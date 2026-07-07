@@ -62,4 +62,30 @@
     <origin xyz="0 -0.265 0.165" rpy="0 0 0"/>
   </joint>
 
+  <!-- 가상 천장 정의 (J3 회전 범위 제한용, Z = 600mm 이상 진입 방지) -->
+  <link name="ceiling">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="2.0 2.0 0.05"/>
+      </geometry>
+      <material name="ceiling_material">
+        <color rgba="0.5 0.5 0.5 0.3"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="2.0 2.0 0.05"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- 테이블 기준 Z=600mm 위에 천장 고정 (밑면이 Z=600mm에 오도록 오프셋 Z=0.75m 설정) -->
+  <joint name="table_to_ceiling" type="fixed">
+    <parent link="table"/>
+    <child link="ceiling"/>
+    <origin xyz="0 0 0.75" rpy="0 0 0"/>
+  </joint>
+
 </robot>

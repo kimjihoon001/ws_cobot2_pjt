@@ -72,38 +72,11 @@ class SceneBuilder(Node):
         self.pub.publish(scene)
         self.get_logger().info('몸통 메시 장애물 추가')
 
-    def add_ceiling(self):
-        obj = CollisionObject()
-        obj.header.frame_id = 'base_link'
-        obj.id = 'ceiling'
-
-        box = SolidPrimitive()
-        box.type = SolidPrimitive.BOX
-        box.dimensions = [2.0, 2.0, 0.05]  # 2m x 2m wide, 5cm thick
-
-        pose = Pose()
-        pose.position.x = 0.3
-        pose.position.y = 0.0
-        pose.position.z = 0.6  # 600mm above robot base (safety ceiling)
-        pose.orientation.w = 1.0
-
-        obj.primitives = [box]
-        obj.primitive_poses = [pose]
-        obj.operation = CollisionObject.ADD
-
-        scene = PlanningScene()
-        scene.world.collision_objects = [obj]
-        scene.is_diff = True
-
-        self.pub.publish(scene)
-        self.get_logger().info('가상 천장 장애물 추가')
-
 def main():
     rclpy.init()
     node = SceneBuilder()
     node.add_table()
     node.add_body_mesh()
-    node.add_ceiling()
     time.sleep(0.5)
     rclpy.shutdown()
 
