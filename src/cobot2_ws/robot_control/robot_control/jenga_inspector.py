@@ -92,9 +92,10 @@ class JengaInspectorNode(Node):
         self.init_database()
         
         # YOLO init
-        model_path = '/home/rokey/cobot_ws/src/ws_cobot2_pjt/src/yolov8_ws/model/best_3.onnx'
+        workspace_path = "/home/rokey/ws_cobot2_pjt"
+        model_path = os.path.join(workspace_path, 'src/yolov8_ws/model/best_3.onnx')
         if not os.path.exists(model_path):
-            model_path = '/home/rokey/cobot_ws/src/ws_cobot2_pjt/src/yolov8_ws/model/best_2.onnx'
+            model_path = os.path.join(workspace_path, 'src/yolov8_ws/model/best_2.onnx')
         self.model = YOLO(model_path, task='detect')
         
         self.bridge = CvBridge()
@@ -1061,8 +1062,11 @@ class JengaInspectorNode(Node):
                 self.inspection_data[2] = final_holes
 
         # 5. Analyze defects (Build 6-floor map and match patterns)
+        failed_reasons = []
         is_pass = self.analyze_defects()
         final_result = "PASS" if is_pass else "FAIL"
+        if not is_pass:
+            failed_reasons.append("Jenga 6-Floor assembly pattern does not match reference templates (Detected wrong hole patterns)")
         avg_overall_confidence = 1.0
 
         self.log_result_to_db(final_result, avg_overall_confidence)
