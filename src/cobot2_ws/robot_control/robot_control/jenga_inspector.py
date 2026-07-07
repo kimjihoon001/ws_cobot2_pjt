@@ -738,49 +738,54 @@ class JengaInspectorNode(Node):
   
         # 4. Generate 4 scanning viewpoints around the Jenga block using Spherical coordinates
         p_target = [p_base[0], p_base[1], p_base[2] - 42.0]
-        
         face_names = ["Front", "Right", "Back", "Left"]
-        successful_viewpoints = []
+        
+        # 측정 각도 확장 설정
+        target_pitches = [30.0, 37.0, 45.0, 52.0, 60.0]
+        face_successful_poses = {i: [] for i in range(4)}
         
         for i in range(4):
             theta = yaw_base + i * (np.pi / 2.0)
-            
-            joint_angles = None
-            for d in [280.0, 250.0, 310.0]:
-                for p in [45.0, 35.0, 55.0]:
+            for p in target_pitches:
+                joint_angles = None
+                for d in [280.0, 250.0, 310.0]:
                     target_pose = self.get_spherical_pose(theta, p, d, p_target)
                     tool_pose = self.get_tool_pose(target_pose)
                     joint_angles = self.solve_ik(tool_pose)
                     if joint_angles:
                         break
                 if joint_angles:
-                    break
-                    
-            if joint_angles:
-                successful_viewpoints.append((i, face_names[i], joint_angles))
-            else:
-                self.get_logger().warn(f"Could not find IK solution for Scan Position {i} ({face_names[i]}). Skipping.")
+                    face_successful_poses[i].append((p, joint_angles))
+                    self.get_logger().info(f"IK solution FOUND for {face_names[i]} Face at Pitch {p}°")
+                else:
+                    self.get_logger().warn(f"IK solution FAILED for {face_names[i]} Face at Pitch {p}°")
 
-        # Choose adjacent faces
-        scan_targets = []
-        n_succ = len(successful_viewpoints)
-        found_adjacent = False
-        for i in range(n_succ):
-            for j in range(i + 1, n_succ):
-                idx1 = successful_viewpoints[i][0]
-                idx2 = successful_viewpoints[j][0]
-                diff = abs(idx1 - idx2)
-                if diff == 1 or diff == 3:  # 90 deg rotation
-                    scan_targets = [successful_viewpoints[i], successful_viewpoints[j]]
-                    found_adjacent = True
-                    break
-            if found_adjacent:
-                break
+        # 2면이 연속되면서 가장 많은 사진을 찍을 수 있는 2면 선택
+        adjacent_pairs = [(0, 1), (1, 2), (2, 3), (3, 0)]
+        best_score = -1
+        best_pair = None
+        
+        for idx1, idx2 in adjacent_pairs:
+            score = len(face_successful_poses[idx1]) + len(face_successful_poses[idx2])
+            if score > best_score:
+                best_score = score
+                best_pair = (idx1, idx2)
                 
-        if not found_adjacent and n_succ >= 2:
-            scan_targets = successful_viewpoints[:2]
+        if best_pair is None or best_score == 0:
+            self.get_logger().error("No valid IK poses found on any face. Aborting inspection.")
+            response.success = False
+            response.message = "Failed to find any valid IK configurations"
+            return
             
-        self.get_logger().info(f"Selected {len(scan_targets)} viewpoints for scanning out of {len(successful_viewpoints)} successful configurations.")
+        idx1, idx2 = best_pair
+        self.get_logger().info(f"Selected Best Adjacent Faces: {face_names[idx1]} and {face_names[idx2]} with total {best_score} poses.")
+
+        # 평탄화된 타겟 리스트 구성
+        scan_targets = []
+        for p, joints in face_successful_poses[idx1]:
+            scan_targets.append((idx1, face_names[idx1], p, joints))
+        for p, joints in face_successful_poses[idx2]:
+            scan_targets.append((idx2, face_names[idx2], p, joints))
 
         inspection_failed = False
         failed_reasons = []
@@ -789,25 +794,24 @@ class JengaInspectorNode(Node):
         # Iterate targets with safety loop
         target_idx = 0
         while target_idx < len(scan_targets):
-            face_idx, face_name, joint_angles = scan_targets[target_idx]
-            self.get_logger().info(f"Moving to Scan Position {face_idx} ({face_name})...")
+            face_idx, face_name, pitch_deg, joint_angles = scan_targets[target_idx]
+            self.get_logger().info(f"Moving to Scan Position: {face_name} Face, Pitch {pitch_deg}°...")
             
             # Try to move to the scan position
             success = self.move_to_joints_moveit(joint_angles)
             if not success:
                 if self.hand_detected:
-                    self.get_logger().warn(f"Hand detected while moving to Scan Position {face_name}! Initiating safety evasion...")
+                    self.get_logger().warn(f"Hand detected while moving to {face_name} Face, Pitch {pitch_deg}°! Initiating safety evasion...")
                     self.execute_safety_evasion()
                     
                     self.get_logger().warn("Waiting for hand to clear before resuming scan...")
                     while rclpy.ok() and self.hand_detected:
                         time.sleep(0.5)
                         
-                    self.get_logger().info(f"Hand cleared. Resuming scan of {face_name} face (retrying same position)...")
-                    # Do not increment target_idx; retry this same scan target
+                    self.get_logger().info(f"Hand cleared. Resuming scan of {face_name} Face, Pitch {pitch_deg}° (retrying same position)...")
                     continue
                 else:
-                    self.get_logger().error(f"Failed to move to Scan Position {face_idx} via MoveGroup due to non-safety reasons. Skipping face.")
+                    self.get_logger().error(f"Failed to move to {face_name} Face, Pitch {pitch_deg}° due to non-safety reasons. Skipping.")
                     target_idx += 1
                     continue
 
@@ -815,13 +819,13 @@ class JengaInspectorNode(Node):
 
             # Double check if hand was detected during settling time
             if self.hand_detected:
-                self.get_logger().warn(f"Hand detected right after arrival at {face_name}! Initiating safety evasion...")
+                self.get_logger().warn(f"Hand detected right after arrival at {face_name} Face, Pitch {pitch_deg}°! Evading...")
                 self.execute_safety_evasion()
                 self.get_logger().warn("Waiting for hand to clear before resuming scan...")
                 while rclpy.ok() and self.hand_detected:
                     time.sleep(0.5)
-                self.get_logger().info(f"Hand cleared. Resuming scan of {face_name} face...")
-                continue # Retry this target position
+                self.get_logger().info("Hand cleared. Resuming scan...")
+                continue
 
             # Run YOLO feature detection
             if not self.detect_features_client.wait_for_service(timeout_sec=3.0):
@@ -839,17 +843,17 @@ class JengaInspectorNode(Node):
                 time.sleep(0.1)
                 
             if self.hand_detected:
-                self.get_logger().warn(f"Hand detected during feature detection on {face_name}! Evading to JReady...")
+                self.get_logger().warn(f"Hand detected during feature detection on {face_name} Face, Pitch {pitch_deg}°! Evading...")
                 self.execute_safety_evasion()
-                self.get_logger().warn("Waiting for hand to clear before resuming scan...")
+                self.get_logger().warn("Waiting for hand to clear...")
                 while rclpy.ok() and self.hand_detected:
                     time.sleep(0.5)
-                self.get_logger().info(f"Hand cleared. Resuming scan of {face_name} face...")
-                continue # Retry this target position
+                self.get_logger().info("Hand cleared. Resuming...")
+                continue
 
             detect_res = detect_future.result()
             if not detect_res or not detect_res.success:
-                self.get_logger().warn(f"Failed to detect features on {face_name} face.")
+                self.get_logger().warn(f"Failed to detect features on {face_name} Face, Pitch {pitch_deg}°.")
                 target_idx += 1
                 continue
 
@@ -875,17 +879,31 @@ class JengaInspectorNode(Node):
 
             # Validate against EXPECTED_FEATURES
             expected = EXPECTED_FEATURES[face_idx]
-            self.get_logger().info(f"[{face_name} Face] Detected: {counts} | Expected: {expected}")
             
-            # Compare holes count
-            if counts["smallhole"] != expected["smallhole"] or counts["longhole"] != expected["longhole"]:
+            # 실시간 정상/불량 판정 계산 (이 시점의 판정)
+            is_face_pass = (counts["smallhole"] == expected["smallhole"]) and (counts["longhole"] == expected["longhole"])
+            face_status_str = "정상 (PASS)" if is_face_pass else "불량 (FAIL)"
+            if not is_face_pass:
                 inspection_failed = True
                 failed_reasons.append(
-                    f"{face_name} face has wrong hole counts: "
+                    f"{face_name} Face at Pitch {pitch_deg}° wrong hole counts: "
                     f"small={counts['smallhole']} (expected {expected['smallhole']}), "
                     f"long={counts['longhole']} (expected {expected['longhole']})"
                 )
-            
+
+            # 실시간 촬영 및 판정 결과 터미널 강제 출력
+            report_msg = (
+                f"\n=================================================="
+                f"\n[실시간 촬영 및 판정 리포트]"
+                f"\n  - 촬영 면 (Face)   : {face_name} 면"
+                f"\n  - 촬영 각도 (Pitch) : {pitch_deg} 도"
+                f"\n  - 판정 결과 (Status): {face_status_str}"
+                f"\n  - 검출 정보 (Details): 감지={counts} | 기준={expected}"
+                f"\n==================================================\n"
+            )
+            self.get_logger().info(report_msg)
+            print(report_msg, flush=True)
+
             # Move on to next target
             target_idx += 1
 

@@ -116,7 +116,7 @@ python3 src/cobot2_ws/m0609_rg2_bringup/scripts/hand_avoidance.py
 ---
 
 ## 🧱 3. 젠가 불량 검사 및 실시간 손 회피 시스템 실행 방법 (Real Mode)
-실제 로봇 환경에서 YOLOv8 및 RealSense 카메라를 결합한 젠가 불량 검사 시퀀스를 기동하고, 동작 중 ROI 기반의 손 회피 기능까지 연동하여 작동시키는 가이드입니다.
+실제 로봇 환경에서 YOLOv8 및 RealSense 카메라를 결합한 젠가 불량 검사 시퀀스(측정 각도 30°, 37°, 45°, 52°, 60° 다중 촬영 및 최적 2면 선정)를 기동하고, 동작 중 ROI 기반의 손 회피 기능까지 연동하여 작동시키는 가이드입니다.
 
 ### 터미널 1: RealSense 카메라 구동
 ```bash
