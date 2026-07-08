@@ -10,3 +10,15 @@ log/
 # API 키/비밀값 파일 제외 규칙
 .env
 **/.env
+
+# ROS2 workspace (tracked separately, not part of this branch yet)
+moveit_test/
+
+# frontend
+frontend/node_modules/
+frontend/dist/
+
+# backend
+backend/**/__pycache__/
+backend/cobot.db
+backend/.secret_key

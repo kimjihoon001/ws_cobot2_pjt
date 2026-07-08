@@ -365,6 +365,7 @@ class JengaInspectorNode(Node):
             self.final_matched_product = "FAIL"
             
         print(f"-> 최종 판정 결과: {product_type}")
+        self.final_jenga_map = jenga_map
         return is_pass
 
     def hand_position_callback(self, msg):
@@ -431,20 +432,23 @@ class JengaInspectorNode(Node):
         self.get_logger().info("Cleared hand obstacle from planning scene.")
 
     def init_database(self):
-        """Creates SQLite database and inspection_logs table if not exists."""
-        db_dir = os.path.join(self.package_path, "resource")
+        """Connects to the backend SQLite database (creates table if not exists)."""
+        # 백엔드의 cobot.db 경로 사용
+        db_dir = os.path.expanduser("~/cobot_ws/src/ws_cobot2_pjt/backend")
         if not os.path.exists(db_dir):
             os.makedirs(db_dir)
-        self.db_path = os.path.join(db_dir, "inspection.db")
+        self.db_path = os.path.join(db_dir, "cobot.db")
         
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS inspection_logs (
+            CREATE TABLE IF NOT EXISTS inspection_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                result TEXT,
-                confidence REAL
+                product VARCHAR(100) NOT NULL,
+                result VARCHAR(10) NOT NULL,
+                defect_location VARCHAR(100),
+                map_data TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
         conn.commit()
@@ -656,17 +660,45 @@ class JengaInspectorNode(Node):
                 
         self.in_evasion = False
 
-    def log_result_to_db(self, result, confidence):
+    def log_result_to_db(self, product, result, defect_location, map_data_json):
         """Logs inspection result to the database."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO inspection_logs (result, confidence) VALUES (?, ?)",
-            (result, float(confidence))
+            "INSERT INTO inspection_results (product, result, defect_location, map_data) VALUES (?, ?, ?, ?)",
+            (product, result.lower(), defect_location, map_data_json)
         )
+        
+        # 정상 제품(PASS)일 경우 재고(resources) 추가 및 로그 기록
+        if result.lower() == 'pass':
+            # 해당 상품명으로 재고가 있는지 확인
+            cursor.execute("SELECT quantity FROM resources WHERE name = ?", (product,))
+            row = cursor.fetchone()
+            
+            if row:
+                # 이미 있으면 수량 + 1
+                cursor.execute("UPDATE resources SET quantity = quantity + 1, updated_at = CURRENT_TIMESTAMP WHERE name = ?", (product,))
+                # 카테고리 추출
+                category_name = '기본형'
+                if 'A형' in product: category_name = 'A형'
+                elif 'B형' in product: category_name = 'B형'
+                elif 'C형' in product: category_name = 'C형'
+                
+                # 없으면 새로 등록
+                cursor.execute(
+                    "INSERT INTO resources (name, item_type, category, quantity, unit, min_quantity, location) VALUES (?, 'product', ?, 1, 'EA', 0, '출하 대기장')",
+                    (product, category_name)
+                )
+                
+            # 인벤토리 로그 남기기
+            cursor.execute(
+                "INSERT INTO inventory_logs (resource_name, action, detail, username) VALUES (?, 'add', '품질 검사 통과 (자동 입고)', 'System')",
+                (product,)
+            )
+
         conn.commit()
         conn.close()
-        self.get_logger().info(f"Logged result '{result}' with confidence {confidence:.2f} to database.")
+        self.get_logger().info(f"Logged result '{result}' to database. Inventory updated if PASS.")
 
     def get_robot_pose_matrix(self, x, y, z, qx, qy, qz, qw):
         R = Rotation.from_quat([qx, qy, qz, qw]).as_matrix()
@@ -1099,9 +1131,16 @@ class JengaInspectorNode(Node):
         final_result = "PASS" if is_pass else "FAIL"
         if not is_pass:
             failed_reasons.append("Jenga 6-Floor assembly pattern does not match reference templates (Detected wrong hole patterns)")
-        avg_overall_confidence = 1.0
+        import json
+        map_data_json = json.dumps(self.final_jenga_map) if hasattr(self, 'final_jenga_map') else None
+        
+        defect_loc = None
+        if not is_pass and len(failed_reasons) > 0:
+            defect_loc = failed_reasons[0]
 
-        self.log_result_to_db(final_result, avg_overall_confidence)
+        # 백엔드 모델에 맞춰 DB에 저장 (정상 제품일 경우 몇형 제품인지 저장, 아닐 경우 불량품 표기)
+        product_name_for_db = self.final_matched_product if is_pass else "알 수 없는 패턴 (불량품)"
+        self.log_result_to_db(product_name_for_db, final_result, defect_loc, map_data_json)
 
         # 6. Return back to Home position with safety evasion checks
         self.get_logger().info("Inspection complete. Returning to Home...")
