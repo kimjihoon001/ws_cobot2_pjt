@@ -291,6 +291,7 @@
   border-radius: 10px;
   border: 1px solid var(--border);
   background: var(--surface-1);
+  color: var(--text-primary);
   font: inherit;
   font-weight: 500;
   cursor: pointer;
@@ -300,6 +301,27 @@
 .control-btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+.control-btn-accent {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.control-btn-good {
+  border-color: var(--status-good);
+  color: var(--status-good);
+}
+
+.control-btn-warning {
+  border-color: var(--status-warning);
+  color: var(--status-warning);
+}
+
+.control-btn-critical-solid {
+  border-color: var(--status-critical);
+  background: var(--status-critical);
+  color: #fff;
 }
 
 .field-grid {
@@ -428,6 +450,51 @@
   height: 8px;
   border-radius: 50%;
   flex: none;
+}
+
+.task-status-row {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.task-status-row > * {
+  flex: 1;
+  min-width: 0;
+}
+
+.stat-tile-large {
+  padding: 24px 28px;
+  min-height: 140px;
+}
+
+.stat-tile-large .stat-tile-label {
+  font-size: 14px;
+}
+
+.stat-tile-large .stat-tile-value {
+  font-size: 52px;
+}
+
+.stat-tile-group {
+  display: flex;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.stat-tile-group-item {
+  flex: 1;
+  padding: 16px 18px;
+}
+
+.stat-tile-group-item + .stat-tile-group-item {
+  border-left: 1px solid var(--border);
+}
+
+.stat-tile-group .stat-tile-value {
+  font-size: 20px;
 }
 
 .qc-image-placeholder {
@@ -564,6 +631,7 @@
   border-radius: 6px;
   border: 1px solid var(--border);
   background: var(--surface-1);
+  color: var(--text-primary);
   cursor: pointer;
   font-size: 15px;
   line-height: 1;
