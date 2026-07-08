@@ -55,7 +55,7 @@ EEF_LINK = 'rg2_tcp'
 # fixed joint로 URDF에 반영되어 있어, MoveIt이 그리퍼 손끝을 직접 목표로 잡는다.
 SPEED_SCALE = 0.1              # 낮을수록 천천히 (가상모드라도 우선 저속 유지)
 PREGRASP_Z_OFFSET = 0.15       # 물체 위 접근 높이 (m)
-GRASP_Z_CLEARANCE = -0.008     # 감지 z는 원통형 손잡이의 맨 윗면(카메라에 보이는 지점)이라
+GRASP_Z_CLEARANCE = -0.005     # 감지 z는 원통형 손잡이의 맨 윗면(카메라에 보이는 지점)이라
                                 # 아래(중심축 쪽)로 내려가서 잡음. 위로 주면 손잡이 중심보다
                                 # 한참 높은 허공에서 손가락이 닫혀 놓침. -0.015는 실기에서
                                 # 바닥과 충돌할 만큼 과했음 — 실측 미세조정 필요한 값.
@@ -84,6 +84,12 @@ HOME_JOINTS_DEG = [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]
 # bringup까지 붙여 실제로 움직이고 싶을 때만 False/True로 바꿀 것.
 PLAN_ONLY = False
 USE_GRIPPER = True
+
+# 사용자가 공구를 잡아당기는 힘(외력) 감지 임계값 (Nm, 관절 토크 변동 기준)
+# 4.0 Nm은 실기 충돌 한계와 겹쳐 로봇이 비상 정지할 가능성이 큼 -> 1.8 Nm로 감지 한계 대폭 완화
+FORCE_DETECTION_THRESHOLD = 1.8
+# 공구 파지 후 외력 감지 모니터링 대기 시간 (초)
+FORCE_MONITORING_TIMEOUT = 10.0
 
 # top-down(그리퍼가 아래를 보는) 자세 — YAW는 keypoint 축으로 매 탐지마다 계산해서 대체함
 GRASP_ROLL, GRASP_PITCH = math.pi, 0.0
@@ -847,6 +853,118 @@ class PickYoloTarget(Node):
             self._attached_collision_pub.publish(aco)
             time.sleep(0.1)
         self.get_logger().info(f"물체 '{obj_id}' 그리퍼에 부착 완료")
+
+    def monitor_user_pull_and_release(self) -> bool:
+        """pregrasp 대기 중인 상태에서 joint_3 ~ joint_6 토크(effort) 혹은 위치(position) 변동을 관측해
+        사용자가 공구를 당기는 힘이 감지되면 그리퍼를 열고 완료 상태를 반환."""
+        self.get_logger().info(
+            f"사용자 외력 대기 시작 (임계값: {FORCE_DETECTION_THRESHOLD} Nm / 위치변위 임계값: 0.015 rad, 제한시간: {FORCE_MONITORING_TIMEOUT}초)..."
+        )
+        start_time = self.get_clock().now()
+        initial_efforts = {}
+        initial_positions = {}
+        target_joints = ['joint_3', 'joint_4', 'joint_5', 'joint_6']
+        use_position_fallback = False
+
+        # 안정적인 시작 평균값 확보용 대기
+        time.sleep(1.0)
+        
+        # ROS 2 토픽 최신 갱신을 위해 spin_once 강제
+        for _ in range(5):
+            rclpy.spin_once(self, timeout_sec=0.05)
+        
+        while rclpy.ok():
+            current_time = self.get_clock().now()
+            duration = (current_time - start_time).nanoseconds / 1e9
+            if duration > FORCE_MONITORING_TIMEOUT:
+                self.get_logger().info("사용자 외력 감지 대기 제한시간 초과. 정상 종료합니다.")
+                return False
+
+            if self.current_joint_state is None:
+                rclpy.spin_once(self, timeout_sec=0.1)
+                continue
+
+            try:
+                # 타겟 관절들의 실시간 effort 및 position 값 수집
+                current_efforts = {}
+                current_positions = {}
+                for name in target_joints:
+                    idx = self.current_joint_state.name.index(name)
+                    current_efforts[name] = self.current_joint_state.effort[idx]
+                    current_positions[name] = self.current_joint_state.position[idx]
+            except (ValueError, IndexError) as e:
+                rclpy.spin_once(self, timeout_sec=0.1)
+                continue
+
+            # effort 데이터가 nan인지 판별
+            has_nan = any(math.isnan(val) for val in current_efforts.values())
+            if has_nan and not use_position_fallback:
+                use_position_fallback = True
+                self.get_logger().warn("⚠️ effort(토크) 피드백이 NaN으로 검출되어 '위치 편차(Position Fallback)' 감지 모드로 전환합니다.")
+
+            if use_position_fallback:
+                # 위치 기반 감지 루프
+                if not initial_positions:
+                    initial_positions = current_positions
+                    init_msg = ", ".join([f"{k}: {v:.3f}rad" for k, v in initial_positions.items()])
+                    self.get_logger().info(f"초기 위치 기준값 설정 완료 -> {init_msg}")
+                    time.sleep(0.1)
+                    continue
+
+                diffs = {name: abs(current_positions[name] - initial_positions[name]) for name in target_joints}
+                debug_msg = " | ".join([f"{name[6:]}: dp={diffs[name]:.4f}rad" for name in target_joints])
+                self.get_logger().info(f"위치 실시간 변동 [ {debug_msg} ]")
+
+                triggered = False
+                triggered_joint = ""
+                # 약 0.015 rad (약 0.85도) 이상의 미세 움직임 발생 시 당긴 것으로 판단
+                POSITION_THRESHOLD = 0.015
+                for name in target_joints:
+                    if diffs[name] > POSITION_THRESHOLD:
+                        triggered = True
+                        triggered_joint = name
+                        break
+
+                if triggered:
+                    self.get_logger().info(
+                        f"⚠️ 외력 감지(위치 편차)! {triggered_joint} 관절에서 임계치 초과 (변위량: {diffs[triggered_joint]:.4f}rad) -> 그리퍼를 엽니다!"
+                    )
+                    self.gripper_command('o')
+                    return True
+            else:
+                # 토크(effort) 기반 감지 루프
+                if not initial_efforts:
+                    initial_efforts = current_efforts
+                    init_msg = ", ".join([f"{k}: {v:.2f}Nm" for k, v in initial_efforts.items()])
+                    self.get_logger().info(f"초기 토크 기준값 설정 완료 -> {init_msg}")
+                    time.sleep(0.1)
+                    continue
+
+                diffs = {name: abs(current_efforts[name] - initial_efforts[name]) for name in target_joints}
+                debug_msg = " | ".join([f"{name[6:]}: d={diffs[name]:.2f}Nm" for name in target_joints])
+                self.get_logger().info(f"토크 실시간 변동 [ {debug_msg} ]")
+
+                triggered = False
+                triggered_joint = ""
+                for name in target_joints:
+                    if diffs[name] > FORCE_DETECTION_THRESHOLD:
+                        triggered = True
+                        triggered_joint = name
+                        break
+
+                if triggered:
+                    self.get_logger().info(
+                        f"⚠️ 외력 감지! {triggered_joint} 관절에서 임계치 초과 (변동량: {diffs[triggered_joint]:.2f}Nm) -> 그리퍼를 엽니다!"
+                    )
+                    self.gripper_command('o')
+                    return True
+
+            # spin_once를 반드시 갱신해주어야 joint_states 토픽 콜백이 실시간으로 돎
+            rclpy.spin_once(self, timeout_sec=0.01)
+            time.sleep(0.1)
+
+        return False
+
     def run(self):
         self.get_logger().info('홈 자세로 이동 중...')
         self.move_to_joints([math.radians(d) for d in HOME_JOINTS_DEG])
@@ -900,11 +1018,8 @@ class PickYoloTarget(Node):
         mesh_msg = None
         try:
             mesh_msg = load_stl_mesh(stl_path, scale=mesh_scale)
-            # TODO(임시 진단용): grasp 지점 IK가 계속 실패하는 게 방금 스폰한 이 메쉬랑
-            # touch_links 안 맞아서 충돌 처리되는 건지 확인하려고 스폰 잠깐 꺼둠.
-            # 확인 후 되돌릴 것.
-            # self.spawn_attached_object(obj_id, mesh_msg, world_position, world_quat)
-            self.get_logger().info(f'{detected_class} 검출 위치에 {obj_id} STL 스폰 완료(임시로 생략)')
+            self.spawn_attached_object(obj_id, mesh_msg, world_position, world_quat)
+            self.get_logger().info(f'{detected_class} 검출 위치에 {obj_id} STL 스폰 완료')
         except Exception as e:
             self.get_logger().error(f'STL 스폰 실패: {e}')
 
@@ -933,6 +1048,14 @@ class PickYoloTarget(Node):
         time.sleep(0.5)
         self.move_to_joints(pregrasp_joints)
         self.get_logger().info('pick 완료')
+
+        # [HRI 추가 기능]: 공구를 들어 올린 후 정지 대기 상태에서 
+        # 사용자가 공구를 잡아당기는 순간(외력 감지) 스스로 놓도록 감시 루프 실행
+        released = self.monitor_user_pull_and_release()
+        if released:
+            self.get_logger().info('사용자 외력 요구로 인해 안전하게 공구를 전달하고 작업을 종료합니다.')
+        else:
+            self.get_logger().info('외력 감지 대기 종료. 정상 프로세스를 종료합니다.')
 
 
 def main():
