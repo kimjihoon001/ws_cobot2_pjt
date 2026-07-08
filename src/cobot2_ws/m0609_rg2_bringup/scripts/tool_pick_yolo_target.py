@@ -1,5 +1,7 @@
 import math
+import os
 import struct
+import subprocess
 import time
 import cv2
 
@@ -9,6 +11,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
+from ament_index_python.packages import get_package_share_directory
 
 from moveit_msgs.action import MoveGroup, ExecuteTrajectory
 from moveit_msgs.msg import (
@@ -96,6 +99,19 @@ TOOL_DELIVERY_JOINTS_DEG = {
 VOICE_TOOL_TO_CLASS = {
     'hammer': 'tool-hammer',
     'screwdriver': 'screw2',
+}
+
+# 작업 중간중간 진행상황을 음성으로 안내(voice_processing 패키지의 resource/audio를
+# 공유해서 재생 — get_keyword.py의 play_audio와 동일한 gst-play-1.0 재생 방식).
+# 터미널 로그 없이도 어느 단계인지 들어서 알 수 있게 하기 위한 용도.
+AUDIO_RESOURCE_PATH = os.path.join(get_package_share_directory('voice_processing'), 'resource', 'audio')
+PROGRESS_AUDIO = {
+    'scan_move': 'progress_scan_move.mp3',
+    'tool_found': 'progress_tool_found.mp3',
+    'tool_not_found': 'progress_tool_not_found.mp3',
+    'picked': 'progress_picked.mp3',
+    'waiting_release': 'progress_waiting_release.mp3',
+    'delivered': 'progress_delivered.mp3',
 }
 
 # move_group만 단독 실행(moveit_camera.launch.py)할 때는 controller_manager가
@@ -1124,6 +1140,16 @@ class PickYoloTarget(Node):
     def _pick_task_tools_cb(self, msg):
         self._pending_tools_message = msg.data
 
+    def play_progress_audio(self, key: str):
+        """PROGRESS_AUDIO에 등록된 진행상황 안내를 재생 (get_keyword.py의 play_audio와
+        동일한 방식). 터미널 로그를 안 보고 있어도 어느 단계인지 들어서 확인하기 위함."""
+        filename = PROGRESS_AUDIO.get(key)
+        if filename is None:
+            return
+        audio_path = os.path.join(AUDIO_RESOURCE_PATH, filename)
+        if os.path.exists(audio_path):
+            subprocess.run(['gst-play-1.0', audio_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     def run(self):
         """백엔드(ros_bridge.py, HMI '음성 시작' 버튼)가 /get_keyword를 호출해서 확정한
         도구 목록이 /pick_task_tools 토픽으로 올 때까지 대기하다가, 오면 perform_pick_task()를
@@ -1162,24 +1188,30 @@ class PickYoloTarget(Node):
                 continue
 
             self.get_logger().info(f'[{tool_name} -> {target}] 스캔 위치로 이동 중...')
+            self.play_progress_audio('scan_move')
             self.move_to_joints([math.radians(d) for d in TOOL_SCAN_JOINTS_DEG])
 
             self.get_logger().info(f'{class_name} 탐지 대기중...')
             detection = self.detect_once(target_class=class_name)
             if detection is None:
                 self.get_logger().error(f'{tool_name}({class_name}) 탐지 실패 (타임아웃) - 건너뜀')
+                self.play_progress_audio('tool_not_found')
                 continue
+            self.play_progress_audio('tool_found')
 
             delivery_joints_deg = TOOL_DELIVERY_JOINTS_DEG.get(class_name, TOOL_SCAN_JOINTS_DEG)
             if not self.pick_detected_tool(detection, delivery_joints_deg):
                 self.get_logger().error(f'{tool_name} pick/배송 실패 - 다음 도구로 진행')
                 continue
+            self.play_progress_audio('picked')
 
             # [HRI 비전 손 감지 + HMI/음성 확인 연동]: 배송 위치에서 정지 대기 상태로
             # 손 근접/HMI 확인/음성 확인 중 먼저 오는 것으로 그리퍼를 열어 전달함
+            self.play_progress_audio('waiting_release')
             released = self.wait_for_release(tool_name, target)
             if released:
                 self.get_logger().info(f'{tool_name} 전달 완료.')
+                self.play_progress_audio('delivered')
             else:
                 self.get_logger().info(f'{tool_name} 릴리즈 대기 종료 (제한시간 초과).')
 
