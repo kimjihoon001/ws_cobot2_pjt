@@ -717,7 +717,7 @@ class JengaInspectorNode(Node):
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO inspection_results (product, result, defect_location, map_data) VALUES (?, ?, ?, ?)",
+            "INSERT INTO inspection_results (product, result, defect_location, map_data, created_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
             (product, result.lower(), defect_location, map_data_json)
         )
         
@@ -730,21 +730,21 @@ class JengaInspectorNode(Node):
             if row:
                 # 이미 있으면 수량 + 1
                 cursor.execute("UPDATE resources SET quantity = quantity + 1, updated_at = CURRENT_TIMESTAMP WHERE name = ?", (product,))
-                # 카테고리 추출
+            else:
+                # 없으면 새로 등록
                 category_name = '기본형'
                 if 'A형' in product: category_name = 'A형'
                 elif 'B형' in product: category_name = 'B형'
                 elif 'C형' in product: category_name = 'C형'
                 
-                # 없으면 새로 등록
                 cursor.execute(
-                    "INSERT INTO resources (name, item_type, category, quantity, unit, min_quantity, location) VALUES (?, 'product', ?, 1, 'EA', 0, '출하 대기장')",
+                    "INSERT INTO resources (name, item_type, category, quantity, unit, min_quantity, location, created_at, updated_at) VALUES (?, 'product', ?, 1, 'EA', 0, '출하 대기장', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
                     (product, category_name)
                 )
                 
             # 인벤토리 로그 남기기
             cursor.execute(
-                "INSERT INTO inventory_logs (resource_name, action, detail, username) VALUES (?, 'add', '품질 검사 통과 (자동 입고)', 'System')",
+                "INSERT INTO inventory_logs (resource_name, action, detail, username, created_at) VALUES (?, 'add', '품질 검사 통과 (자동 입고)', 'System', CURRENT_TIMESTAMP)",
                 (product,)
             )
 
