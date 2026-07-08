@@ -41,9 +41,9 @@ source install/setup.bash
 
 ---
 
-## 🦾 1. YOLO 공구 인식 및 자동 파지 시스템 실행 방법
+## 🦾 1. YOLO 공구 인식 및 자동 파지 & 손 접근 전달 시스템 실행 방법
 
-YOLO + RealSense 깊이 카메라로 해머를 감지하고, MoveIt 관절 공간 제어(Joint Space Control)로 자동 파지 후 들어 올리는 시스템입니다.
+YOLO + RealSense 깊이 카메라로 해머를 감지하고, MoveIt 관절 공간 제어로 자동 파지 후 들어 올립니다. 이동 중에는 작업자의 손을 자동으로 회피하며, 전달 지점에 도달하면 손의 접근을 인지해 자동으로 그리퍼를 열어 전달하는 안전 HRI 시스템입니다.
 
 > [!IMPORTANT]
 > **준비 사항**: PC와 두산 로봇 컨트롤러는 반드시 **유선 랜선(이더넷)**으로 연결되어 있어야 합니다. 로봇 펜던트의 동작 모드는 **자동(Auto)** 상태로 설정해 주세요.
@@ -65,10 +65,21 @@ ros2 launch m0609_rg2_bringup bringup_camera.launch.py mode:=real host:=192.168.
 ```bash
 cd ~/ws_cobot2_pjt && source install/setup.bash
 ros2 launch m0609_rg2_moveit movegroup_only.launch.py
-
 ```
 
-### 터미널 4: YOLO 파지 스크립트 실행
+### 터미널 4: YOLO 손 3D 위치 검출 서비스 구동
+```bash
+cd ~/ws_cobot2_pjt && source install/setup.bash
+ros2 run object_hand object_hand
+```
+
+### 터미널 5: 실시간 손 좌표 변환 및 장애물 퍼블리셔 구동
+```bash
+cd ~/ws_cobot2_pjt && source install/setup.bash
+ros2 run object_hand hand_obstacle_publisher
+```
+
+### 터미널 6: YOLO 파지 및 손 감지 릴리즈 제어 스크립트 실행 (장애물 씬 직접 갱신 내장)
 ```bash
 cd ~/ws_cobot2_pjt && source install/setup.bash
 python3 src/cobot2_ws/m0609_rg2_bringup/scripts/tool_pick_yolo_target.py
@@ -79,7 +90,9 @@ python3 src/cobot2_ws/m0609_rg2_bringup/scripts/tool_pick_yolo_target.py
 2. 깊이 센서로 실제 3D 좌표(`base_link` 기준) 계산
 3. MoveIt Planning Scene에 해머 STL 메쉬를 장애물로 스폰
 4. 관절 공간 IK(Joint Space Control)로 pregrasp → grasp 이동
+   - **(손 회피 기동)**: 이동 도중 손이 감지될 경우 자동으로 우회하여 이동하며, 완전히 막히면 안전하게 그 자리에 대기하다가 손이 치워지면 자동으로 우회로를 재계획하여 이동합니다.
 5. RG2 그리퍼 닫기 → 파지 완료 → 들어 올리기 (pregrasp 복귀)
+6. **(손 접근 자동 전달)**: 전달 대기 위치에 멈춰 선 뒤, 사용자의 손이 그리퍼 끝단 근처 15cm 이내로 진입하면 그리퍼를 즉시 열어 안전하게 공구를 전달합니다.
 
 ---
 
