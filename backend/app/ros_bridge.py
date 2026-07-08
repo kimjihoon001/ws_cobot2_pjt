@@ -62,29 +62,50 @@ class VoiceBridgeNode(Node):
         # tool_pick_yolo_target.py가 집어가게 한다 (get_keyword를 부르는 주체는 여기 하나뿐).
         self._get_keyword_cli = self.create_client(Trigger, "get_keyword", callback_group=cb_group)
         self._pick_task_pub = self.create_publisher(String, "pick_task_tools", 10)
+        self._hmi_get_keyword_in_flight = False
+        self._last_pick_task_data = ""
+        self._last_pick_task_at = 0.0
         self.get_logger().info("VoiceBridgeNode 준비 완료 (confirm_tools/confirm_release 서비스 대기 중)")
 
     def start_listening(self) -> bool:
         """HMI '음성 시작' 버튼. get_keyword 서비스가 안 떠 있으면 False."""
         if not self._get_keyword_cli.service_is_ready():
             return False
+        self._hmi_get_keyword_in_flight = True
         future = self._get_keyword_cli.call_async(Trigger.Request())
         future.add_done_callback(self._on_get_keyword_done)
         return True
+
+    def _publish_pick_task(self, tools, targets, source: str):
+        data = " ".join(f"{tool}:{target}" for tool, target in zip(tools, targets))
+        self._publish_pick_task_data(data, source)
+
+    def _publish_pick_task_data(self, data: str, source: str):
+        now = time.monotonic()
+        if data == self._last_pick_task_data and now - self._last_pick_task_at < 5.0:
+            self.get_logger().info(f"/pick_task_tools 중복 발행 생략({source}): {data!r}")
+            return
+        msg = String()
+        msg.data = data
+        self._pick_task_pub.publish(msg)
+        self._last_pick_task_data = data
+        self._last_pick_task_at = now
+        self.get_logger().info(f"/pick_task_tools 발행({source}): {data!r}")
 
     def _on_get_keyword_done(self, future):
         try:
             result = future.result()
         except Exception as e:
             self.get_logger().error(f"get_keyword 호출 실패: {e}")
+            self._hmi_get_keyword_in_flight = False
             return
         if result is None or not result.success:
             self.get_logger().info("get_keyword 응답 없음/실패 - 픽업 트리거 안 함")
+            self._hmi_get_keyword_in_flight = False
             return
-        self.get_logger().info(f"get_keyword 응답 수신, 픽업 트리거: {result.message!r}")
-        msg = String()
-        msg.data = result.message
-        self._pick_task_pub.publish(msg)
+        self.get_logger().info(f"get_keyword 응답 수신: {result.message!r}")
+        self._publish_pick_task_data(result.message, "get_keyword_done")
+        self._hmi_get_keyword_in_flight = False
 
     def _start_pending(self, kind: str, tools, targets) -> dict:
         """DB에 pending row 생성 + 화면에 띄울 payload 구성."""
@@ -144,6 +165,8 @@ class VoiceBridgeNode(Node):
 
         got_answer = pending["event"].wait(timeout=60.0)  # 최대 60초 대기
         response.confirmed = pending["result"]["confirmed"] if got_answer else False
+        if response.confirmed:
+            self._publish_pick_task(request.tools, request.targets, "confirm_tools")
         self._pending = None
         return response
 
@@ -177,7 +200,28 @@ class VoiceBridgeNode(Node):
         if self._pending_release and self._pending_release["db_id"] == db_id:
             self._resolve(self._pending_release, confirmed)
             return True
-        return False
+
+        db = SessionLocal()
+        try:
+            row = db.get(VoiceConfirmRequest, db_id)
+            if row is None or row.status != "pending":
+                return False
+
+            row.status = "confirmed" if confirmed else "rejected"
+            row.resolved_at = _utcnow()
+            tools = json.loads(row.tools)
+            targets = json.loads(row.targets)
+            kind = row.kind
+            db.commit()
+        finally:
+            db.close()
+
+        self.get_logger().warning(
+            f"라이브 pending 슬롯 없이 DB 요청만 처리됨: id={db_id}, confirmed={confirmed}"
+        )
+        if confirmed and kind == "tool_confirm":
+            self._publish_pick_task(tools, targets, "stale_tool_confirm")
+        return True
 
     def get_pending_payload(self):
         """작업 화면이 늦게 열렸을 때, 아직 대기 중인 확인 요청을 다시 보낸다."""

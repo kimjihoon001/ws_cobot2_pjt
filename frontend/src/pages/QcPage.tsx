@@ -191,7 +191,7 @@ export function QcPage() {
       )}
 
       {selectedInspection ? (
-        <JengaMapVisualizer mapDataStr={selectedInspection.map_data} />
+        <JengaMapVisualizer mapData={selectedInspection.map_data} />
       ) : (
         <>
           <div className="qc-image-placeholder">항목을 선택하세요</div>
