@@ -53,6 +53,7 @@ class InspectionResult(Base):
     product: Mapped[str] = mapped_column(String(100), nullable=False)
     result: Mapped[str] = mapped_column(String(10), nullable=False)
     defect_location: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    map_data: Mapped[str | None] = mapped_column(String, nullable=True)  # JSON string
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 

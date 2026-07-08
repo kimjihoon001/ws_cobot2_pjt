@@ -71,6 +71,7 @@ class InspectionOut(BaseModel):
     product: str
     result: InspectionResultValue
     defect_location: str | None
+    map_data: str | None = None
     created_at: datetime
 
 
