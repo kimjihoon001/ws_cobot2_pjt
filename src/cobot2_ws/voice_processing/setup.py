@@ -30,6 +30,7 @@ setup(
     entry_points={
         'console_scripts': [
             'get_keyword = voice_processing.get_keyword:main',
+            'wakeup_word = voice_processing.wakeup_word:main',
         ],
     },
 )
