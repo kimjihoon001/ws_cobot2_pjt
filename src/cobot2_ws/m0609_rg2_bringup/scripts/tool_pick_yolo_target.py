@@ -27,7 +27,7 @@ from ultralytics import YOLO
 import tf2_ros
 from tf2_geometry_msgs import do_transform_pose
 from onrobot_rg_msgs.srv import SetCommand
-from od_msg.srv import ConfirmTools, ListenYesNo
+from od_msg.srv import ConfirmTools
 
 # 최종 하강(grasp)은 관절공간 IK 이동 대신 MoveIt Cartesian Path
 # (compute_cartesian_path + ExecuteTrajectory)로 처리 — pregrasp/grasp를 각각
@@ -57,9 +57,10 @@ EEF_LINK = 'rg2_tcp'
 # fixed joint로 URDF에 반영되어 있어, MoveIt이 그리퍼 손끝을 직접 목표로 잡는다.
 SPEED_SCALE = 0.2              # 낮을수록 천천히 (0.1은 너무 느리다는 실기 피드백으로 상향, 필요시 재조정)
 PREGRASP_Z_OFFSET = 0.15       # 물체 위 접근 높이 (m)
-REFINE_SETTLE_SEC = 0.8        # 상공 이동 후 카메라/로봇 진동 안정화 시간
-REFINE_SAMPLE_COUNT = 5        # 상공에서 새로 취득할 검출 프레임 수
-REFINE_MIN_VALID_SAMPLES = 3   # 이 개수 미만이면 최초 원거리 좌표로 폴백
+REFINE_SETTLE_SEC = 0.5        # 상공 이동 후 카메라/로봇 진동 안정화 시간
+REFINE_SAMPLE_COUNT = 3        # 상공에서 새로 취득할 검출 프레임 수
+REFINE_MIN_VALID_SAMPLES = 2   # 이 개수 미만이면 최초 원거리 좌표로 폴백
+REFINE_SAMPLE_TIMEOUT_SEC = 1.5
 # 감지 z는 원통형 손잡이의 맨 윗면(카메라에 보이는 지점)이라 아래(중심축 쪽)로
 # 내려가서 잡음. 위로 주면 손잡이 중심보다 한참 높은 허공에서 손가락이 닫혀 놓침.
 # 도구마다 손잡이 두께/무게중심이 달라 최적값이 다름 - 도구별로 따로 관리.
@@ -68,7 +69,7 @@ REFINE_MIN_VALID_SAMPLES = 3   # 이 개수 미만이면 최초 원거리 좌표
 # 내려가야 함 — 실측 미세조정 필요한 값.
 GRASP_Z_CLEARANCE_BY_CLASS = {
     'tool-hammer': -0.0058,
-    'screw2': -0.0073,
+    'screw2': -0.0077,
 }
 CARTESIAN_MAX_STEP = 0.01      # pregrasp -> grasp 하강 Cartesian Path 보간 간격 (m)
 
@@ -367,17 +368,11 @@ class PickYoloTarget(Node):
             self.get_logger().info('  ... /execute_trajectory 응답 없음, 재시도 중...')
             rclpy.spin_once(self, timeout_sec=0.1)
 
-        # 배송 완료 확인(HMI 확인/아니오, voice_processing 음성 예/아니오) 클라이언트
+        # 배송 완료 확인(HMI 확인/아니오) 클라이언트
         self._confirm_release_cli = self.create_client(ConfirmTools, '/confirm_release')
         self.get_logger().info('/confirm_release 대기중...')
         while not self._confirm_release_cli.wait_for_service(timeout_sec=1.0):
             self.get_logger().info('  ... /confirm_release 응답 없음, 재시도 중...')
-            rclpy.spin_once(self, timeout_sec=0.1)
-
-        self._listen_confirmation_cli = self.create_client(ListenYesNo, '/listen_confirmation')
-        self.get_logger().info('/listen_confirmation 대기중...')
-        while not self._listen_confirmation_cli.wait_for_service(timeout_sec=1.0):
-            self.get_logger().info('  ... /listen_confirmation 응답 없음, 재시도 중...')
             rclpy.spin_once(self, timeout_sec=0.1)
 
         self.get_logger().info('준비 완료')
@@ -550,7 +545,10 @@ class PickYoloTarget(Node):
             # 이동 전에 수신한 프레임으로 재검출하지 않도록 새 프레임을 강제한다.
             self.color_frame = None
             self.depth_frame = None
-            detection = self.detect_once(target_class=target_class, timeout_sec=3.0)
+            detection = self.detect_once(
+                target_class=target_class,
+                timeout_sec=REFINE_SAMPLE_TIMEOUT_SEC,
+            )
             if detection is None:
                 self.get_logger().warn(
                     f'상공 재검출 샘플 실패 ({sample_idx + 1}/{REFINE_SAMPLE_COUNT})'
@@ -1066,15 +1064,16 @@ class PickYoloTarget(Node):
         )
 
     def wait_for_release(self, tool_name, target) -> bool:
-        """배송 위치 도착 후 그리퍼를 열 신호를 기다린다. 셋 중 아무거나 먼저 오면 릴리즈:
+        """배송 위치 도착 후 그리퍼를 열 신호를 기다린다. 둘 중 먼저 오면 릴리즈:
         1) hand_obstacle_publisher 기준 손 근접(15cm, 기존 로직)
-        2) HMI 확인/아니오 (/confirm_release) - confirmed=True일 때만 릴리즈
-        3) 음성 예/아니오 (/listen_confirmation, voice_processing) - confirmed=True일 때만 릴리즈
-        confirmed=False(아니오)는 릴리즈 트리거가 아니라 "아직 아니다"로 간주하고 계속 대기."""
+        2) HMI 확인/아니오 (/confirm_release) - confirmed=True일 때만 릴리즈.
+
+        키워드 추출 후 마이크가 반복 녹음되지 않도록 음성 예/아니오 확인은 사용하지 않는다.
+        """
         HAND_PROXIMITY_THRESHOLD = 0.15
 
         self.get_logger().info(
-            f"배송 완료 대기 시작 ({tool_name} -> {target}, 손 접근/HMI확인/음성확인 중 먼저 오는 것 사용, "
+            f"배송 완료 대기 시작 ({tool_name} -> {target}, 손 접근/HMI확인 중 먼저 오는 것 사용, "
             f"제한시간: {FORCE_MONITORING_TIMEOUT}초)..."
         )
         start_time = self.get_clock().now()
@@ -1088,8 +1087,6 @@ class PickYoloTarget(Node):
         release_req.tools = [tool_name]
         release_req.targets = [target]
         release_future = self._confirm_release_cli.call_async(release_req)
-
-        listen_future = self._listen_confirmation_cli.call_async(ListenYesNo.Request())
 
         while rclpy.ok():
             current_time = self.get_clock().now()
@@ -1109,15 +1106,6 @@ class PickYoloTarget(Node):
                     return True
                 # 아니오/응답없음이면 재요청해서 계속 대기 (한 번 소모됐으니 다시 물어봄)
                 release_future = self._confirm_release_cli.call_async(release_req)
-
-            # 3) 음성 예/아니오
-            if listen_future.done():
-                result = listen_future.result()
-                if result is not None and result.heard and result.confirmed:
-                    self.get_logger().info("음성 확인으로 그리퍼를 열어 공구를 전달합니다.")
-                    self.gripper_command('o')
-                    return True
-                listen_future = self._listen_confirmation_cli.call_async(ListenYesNo.Request())
 
             # 1) 손 근접 (기존 로직)
             if self.current_hand_pos is not None:
