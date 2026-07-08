@@ -55,7 +55,7 @@ EEF_LINK = 'rg2_tcp'
 # fixed joint로 URDF에 반영되어 있어, MoveIt이 그리퍼 손끝을 직접 목표로 잡는다.
 SPEED_SCALE = 0.1              # 낮을수록 천천히 (가상모드라도 우선 저속 유지)
 PREGRASP_Z_OFFSET = 0.15       # 물체 위 접근 높이 (m)
-GRASP_Z_CLEARANCE = -0.008     # 감지 z는 원통형 손잡이의 맨 윗면(카메라에 보이는 지점)이라
+GRASP_Z_CLEARANCE = -0.005     # 감지 z는 원통형 손잡이의 맨 윗면(카메라에 보이는 지점)이라
                                 # 아래(중심축 쪽)로 내려가서 잡음. 위로 주면 손잡이 중심보다
                                 # 한참 높은 허공에서 손가락이 닫혀 놓침. -0.015는 실기에서
                                 # 바닥과 충돌할 만큼 과했음 — 실측 미세조정 필요한 값.
@@ -84,6 +84,12 @@ HOME_JOINTS_DEG = [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]
 # bringup까지 붙여 실제로 움직이고 싶을 때만 False/True로 바꿀 것.
 PLAN_ONLY = False
 USE_GRIPPER = True
+
+# 사용자가 공구를 잡아당기는 힘(외력) 감지 임계값 (Nm, 관절 토크 변동 기준)
+# 4.0 Nm은 실기 충돌 한계와 겹쳐 로봇이 비상 정지할 가능성이 큼 -> 1.8 Nm로 감지 한계 대폭 완화
+FORCE_DETECTION_THRESHOLD = 1.8
+# 공구 파지 후 외력 감지 모니터링 대기 시간 (초) - 충분히 긴 시간으로 연장
+FORCE_MONITORING_TIMEOUT = 60.0
 
 # top-down(그리퍼가 아래를 보는) 자세 — YAW는 keypoint 축으로 매 탐지마다 계산해서 대체함
 GRASP_ROLL, GRASP_PITCH = math.pi, 0.0
@@ -273,6 +279,10 @@ class PickYoloTarget(Node):
         self.create_subscription(Image, '/camera/camera/aligned_depth_to_color/image_raw', self._depth_cb, 10)
         self.create_subscription(CameraInfo, '/camera/camera/color/camera_info', self._camera_info_cb, 10)
         self.create_subscription(JointState, '/joint_states', self._joint_state_cb, 10)
+        
+        # [HRI 비전 기반 손 감지]: hand_obstacle_publisher가 발행하는 손의 3D 좌표 구독
+        self.current_hand_pos = None
+        self.create_subscription(Point, '/hand_position', self._hand_position_cb, 10)
 
         # YOLO 탐지 시각화 이미지 퍼블리셔 (rqt_image_view로 확인)
         self._vis_pub = self.create_publisher(Image, '/yolo_detection/image', 1)
@@ -338,6 +348,18 @@ class PickYoloTarget(Node):
         self.current_joint_state = msg
         if 'joint_6' in msg.name:
             self.current_joint6 = msg.position[msg.name.index('joint_6')]
+
+    def _hand_position_cb(self, msg):
+        """hand_obstacle_publisher가 발행하는 base_link 기준 손 위치(m) 수신 및 장애물 씬 직접 갱신 (전체 범위 수용)"""
+        is_clear_signal = msg.z < -1.0
+            
+        if is_clear_signal:
+            if self.current_hand_pos is not None:
+                self.current_hand_pos = None
+                self.clear_hand_obstacle()
+        else:
+            self.current_hand_pos = [msg.x, msg.y, msg.z]
+            self.update_hand_obstacle(msg.x, msg.y, msg.z)
 
     def _sample_depth(self, cx_px, cy_px):
         h, w = self.depth_frame.shape[:2]
@@ -484,6 +506,53 @@ class PickYoloTarget(Node):
         qx, qy, qz, qw = quat_from_rpy(GRASP_ROLL, GRASP_PITCH, yaw)
         pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w = qx, qy, qz, qw
         return pose
+
+    def get_current_tcp_pose_tf(self):
+        """base_link 대비 rg2_tcp(EEF_LINK)의 실시간 [x, y, z] 좌표를 미터 단위로 획득"""
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                PLANNING_FRAME, EEF_LINK, rclpy.time.Time(),
+                timeout=Duration(seconds=1.0)
+            )
+            return [
+                transform.transform.translation.x,
+                transform.transform.translation.y,
+                transform.transform.translation.z
+            ]
+        except Exception as e:
+            self.get_logger().error(f"TCP TF 조회 실패: {e}")
+            return None
+
+    def update_hand_obstacle(self, x, y, z):
+        """MoveIt planning scene에 손 장애물(human_hand) 스폰/갱신. 젠가 코드와 동일한 2.5cm 반지름(지름 5cm) 공"""
+        obj = CollisionObject()
+        obj.header.frame_id = PLANNING_FRAME
+        obj.id = 'human_hand'
+
+        sphere = SolidPrimitive()
+        sphere.type = SolidPrimitive.SPHERE
+        sphere.dimensions = [0.025] # 2.5cm safety sphere radius (5cm diameter)
+
+        pose = Pose()
+        pose.position.x = x
+        pose.position.y = y
+        pose.position.z = z
+        pose.orientation.w = 1.0
+
+        obj.primitives = [sphere]
+        obj.primitive_poses = [pose]
+        obj.operation = CollisionObject.ADD
+
+        # MoveIt PlanningScene Diff 발행 (collision_pub 사용)
+        self._collision_pub.publish(obj)
+
+    def clear_hand_obstacle(self):
+        """MoveIt planning scene에서 손 장애물 제거"""
+        obj = CollisionObject()
+        obj.header.frame_id = PLANNING_FRAME
+        obj.id = 'human_hand'
+        obj.operation = CollisionObject.REMOVE
+        self._collision_pub.publish(obj)
 
     def axis_yaw(self, head_px, tail_px):
         """head<->tail keypoint 축을 base_link 수평면 각도로 변환.
@@ -684,22 +753,29 @@ class PickYoloTarget(Node):
         goal_msg.request = req
         goal_msg.planning_options = opts
 
-        self.get_logger().info(f'관절 공간 이동: {[f"{math.degrees(p):.1f}" for p in joint_positions]} deg')
-        send_future = self._move_ac.send_goal_async(goal_msg)
-        rclpy.spin_until_future_complete(self, send_future)
-        goal_handle = send_future.result()
-        if not goal_handle.accepted:
-            self.get_logger().error('목표가 move_group에서 거부됨')
-            return False
+        while rclpy.ok():
+            self.get_logger().info(f'관절 공간 이동: {[f"{math.degrees(p):.1f}" for p in joint_positions]} deg')
+            send_future = self._move_ac.send_goal_async(goal_msg)
+            rclpy.spin_until_future_complete(self, send_future)
+            goal_handle = send_future.result()
+            if not goal_handle.accepted:
+                self.get_logger().error('목표가 move_group에서 거부됨. 손에 막혔을 가능성이 높습니다. 2.0초 뒤 재시도...')
+                time.sleep(2.0)
+                continue
 
-        result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self, result_future)
-        result = result_future.result().result
+            result_future = goal_handle.get_result_async()
+            rclpy.spin_until_future_complete(self, result_future)
+            result = result_future.result().result
 
-        if result.error_code.val == 1:
-            self.get_logger().info('관절 공간 이동 완료')
-            return True
-        self.get_logger().error(f'실패: error_code={result.error_code.val}')
+            if result.error_code.val == 1:
+                self.get_logger().info('관절 공간 이동 완료')
+                return True
+            else:
+                self.get_logger().error(
+                    f'이동 실패 (error_code={result.error_code.val}). 경로가 손에 의해 막혔을 수 있습니다. 2.0초 뒤 재시도...'
+                )
+                time.sleep(2.0)
+
         return False
 
     def move_cartesian(self, target_pose: Pose, speed_scale=SPEED_SCALE):
@@ -847,6 +923,68 @@ class PickYoloTarget(Node):
             self._attached_collision_pub.publish(aco)
             time.sleep(0.1)
         self.get_logger().info(f"물체 '{obj_id}' 그리퍼에 부착 완료")
+
+    def monitor_hand_proximity_and_release(self) -> bool:
+        """pregrasp 대기 상태에서 hand_obstacle_publisher가 발행하는 3D 손 위치 좌표와
+        그리퍼 팁(rg2_tcp)의 실시간 거리를 비교하여 15cm 이내로 좁혀지면 그리퍼를 엽니다."""
+        # 15cm 이내 접근 시 전달 트리거
+        HAND_PROXIMITY_THRESHOLD = 0.15
+
+        self.get_logger().info(
+            f"사용자 손 접근 대기 시작 (거리 임계치: {HAND_PROXIMITY_THRESHOLD} m, 제한시간: {FORCE_MONITORING_TIMEOUT}초)..."
+        )
+        start_time = self.get_clock().now()
+
+        # 안정적인 토픽 수신을 위한 대기
+        time.sleep(1.0)
+        
+        # ROS 2 토픽 최신 갱신을 위해 spin_once 강제
+        for _ in range(5):
+            rclpy.spin_once(self, timeout_sec=0.05)
+
+        while rclpy.ok():
+            current_time = self.get_clock().now()
+            duration = (current_time - start_time).nanoseconds / 1e9
+            if duration > FORCE_MONITORING_TIMEOUT:
+                self.get_logger().info("사용자 손 접근 대기 제한시간 초과. 프로세스를 정상 종료합니다.")
+                return False
+
+            # spin_once를 실행하여 손 위치 토픽 콜백 구동
+            rclpy.spin_once(self, timeout_sec=0.01)
+
+            if self.current_hand_pos is None:
+                self.get_logger().info("손 위치 데이터(/hand_position) 수신 대기 중...", once=True)
+                time.sleep(0.1)
+                continue
+
+            # 실시간 TCP 위치 획득
+            tcp_xyz = self.get_current_tcp_pose_tf()
+            if tcp_xyz is None:
+                self.get_logger().warn("실시간 TCP TF 획득 실패. 재시도합니다.")
+                time.sleep(0.1)
+                continue
+
+            # 직선 거리(유클리드 거리) 계산
+            dx = self.current_hand_pos[0] - tcp_xyz[0]
+            dy = self.current_hand_pos[1] - tcp_xyz[1]
+            dz = self.current_hand_pos[2] - tcp_xyz[2]
+            dist = np.sqrt(dx**2 + dy**2 + dz**2)
+
+            self.get_logger().info(
+                f"작업자 손과의 거리: {dist:.3f} m (손: x={self.current_hand_pos[0]:.2f}, y={self.current_hand_pos[1]:.2f}, z={self.current_hand_pos[2]:.2f} / TCP: x={tcp_xyz[0]:.2f}, y={tcp_xyz[1]:.2f}, z={tcp_xyz[2]:.2f})"
+            )
+
+            if dist < HAND_PROXIMITY_THRESHOLD:
+                self.get_logger().info(
+                    f"⚠️ 작업자 손 근접 감지! (거리: {dist:.3f} m <= {HAND_PROXIMITY_THRESHOLD} m) 그리퍼를 열어 공구를 안전하게 전달합니다!"
+                )
+                self.gripper_command('o')
+                return True
+
+            time.sleep(0.1)
+
+        return False
+
     def run(self):
         self.get_logger().info('홈 자세로 이동 중...')
         self.move_to_joints([math.radians(d) for d in HOME_JOINTS_DEG])
@@ -900,11 +1038,8 @@ class PickYoloTarget(Node):
         mesh_msg = None
         try:
             mesh_msg = load_stl_mesh(stl_path, scale=mesh_scale)
-            # TODO(임시 진단용): grasp 지점 IK가 계속 실패하는 게 방금 스폰한 이 메쉬랑
-            # touch_links 안 맞아서 충돌 처리되는 건지 확인하려고 스폰 잠깐 꺼둠.
-            # 확인 후 되돌릴 것.
-            # self.spawn_attached_object(obj_id, mesh_msg, world_position, world_quat)
-            self.get_logger().info(f'{detected_class} 검출 위치에 {obj_id} STL 스폰 완료(임시로 생략)')
+            self.spawn_attached_object(obj_id, mesh_msg, world_position, world_quat)
+            self.get_logger().info(f'{detected_class} 검출 위치에 {obj_id} STL 스폰 완료')
         except Exception as e:
             self.get_logger().error(f'STL 스폰 실패: {e}')
 
@@ -928,11 +1063,23 @@ class PickYoloTarget(Node):
 
         if not self.gripper_command('c'):
             return
+
         # 그리퍼를 닫은 후, 월드(base_link)에 있던 장애물을 그리퍼 프레임으로 리어태치
         self.attach_object_to_gripper(obj_id, mesh_msg, gripper_position, gripper_quat)
         time.sleep(0.5)
         self.move_to_joints(pregrasp_joints)
         self.get_logger().info('pick 완료')
+
+        # [HRI 비전 손 감지 연동]: 공구를 들어 올린 후 정지 대기 상태에서 
+        # 사용자의 손이 15cm 이내로 가까워지면 자동으로 그리퍼를 열어 전달함
+        released = self.monitor_hand_proximity_and_release()
+        if released:
+            self.get_logger().info('사용자 손 접근 확인으로 인해 안전하게 공구를 전달하고 작업을 종료합니다.')
+        else:
+            self.get_logger().info('손 감지 대기 종료. 정상 프로세스를 종료합니다.')
+        
+        # 동작 종료 후 씬 잔해 청소
+        self.clear_hand_obstacle()
 
 
 def main():
