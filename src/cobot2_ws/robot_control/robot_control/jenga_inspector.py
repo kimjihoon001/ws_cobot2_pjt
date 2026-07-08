@@ -90,7 +90,7 @@ EXPECTED_FEATURES = {
 # 검사장소 이동 후에는 로봇팔이 바로 검사를 시작해야 해서 완료를 기다리지만(펌웨어가
 # 이동 완료를 시리얼로 알려주지 않아 실측 소요시간+여유로 sleep), 합격 후 2300 이동은
 # 그 뒤에 로봇팔이 할 일이 없어서 완료를 기다리지 않고 그냥 보내기만 한다.
-CONVEYOR_MOVE_TO_INSPECTION_STEPS = -3500
+CONVEYOR_MOVE_TO_INSPECTION_STEPS = -7700
 CONVEYOR_MOVE_TO_INSPECTION_WAIT_SEC = 28.0    # 실측 26.94초 + 여유
 CONVEYOR_MOVE_TO_PASS_STEPS = -2300
 
