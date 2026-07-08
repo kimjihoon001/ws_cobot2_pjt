@@ -329,23 +329,29 @@ class JengaInspectorNode(Node):
         jenga_map = {floor: ["O", "O", "O"] for floor in range(6, 0, -1)}
         
         pos_to_idx = {"Left": 0, "Center": 1, "Right": 2}
+        mirror_pos = {"Left": "Right", "Center": "Center", "Right": "Left"}
         
-        detected_features = {1: [], 2: []}
-        
-        if 1 in self.inspection_data:
-            for floor, pos in self.inspection_data[1]:
+        # 홀수 층 (1, 3, 5): Front(0) & Back(2) 면에서 관측
+        if 0 in self.inspection_data:
+            for floor, pos in self.inspection_data[0]:
                 if floor % 2 != 0 and 1 <= floor <= 6:
                     jenga_map[floor][pos_to_idx[pos]] = "X"
-                    detected_features[1].append((pos, floor))
-        
+                    
         if 2 in self.inspection_data:
             for floor, pos in self.inspection_data[2]:
+                if floor % 2 != 0 and 1 <= floor <= 6:
+                    jenga_map[floor][pos_to_idx[mirror_pos[pos]]] = "X"
+
+        # 짝수 층 (2, 4, 6): Right(1) & Left(3) 면에서 관측
+        if 1 in self.inspection_data:
+            for floor, pos in self.inspection_data[1]:
                 if floor % 2 == 0 and 1 <= floor <= 6:
                     jenga_map[floor][pos_to_idx[pos]] = "X"
-                    detected_features[2].append((pos, floor))
                     
-        for k in detected_features:
-            detected_features[k] = sorted(detected_features[k], key=lambda x: x[1])
+        if 3 in self.inspection_data:
+            for floor, pos in self.inspection_data[3]:
+                if floor % 2 == 0 and 1 <= floor <= 6:
+                    jenga_map[floor][pos_to_idx[mirror_pos[pos]]] = "X"
 
         print("\n================ Jenga 6-Floor Map ================")
         print("  [Floor]  [Left]  [Center]  [Right]")
