@@ -4,6 +4,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+import os
 
 from .database import Base, engine
 from .routers import auth, qc, resources, robot, users, voice
@@ -20,6 +22,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="cobot2 HMI API", lifespan=lifespan)
+
+# Ensure static directory exists
+os.makedirs(os.path.join(os.path.dirname(__file__), "..", "static", "inspection_images"), exist_ok=True)
+app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "..", "static")), name="static")
 
 app.add_middleware(
     CORSMiddleware,
