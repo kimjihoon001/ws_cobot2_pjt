@@ -85,6 +85,15 @@ EXPECTED_FEATURES = {
     3: {"smallhole": 1, "longhole": 2}
 }
 
+# 컨베이어(conveyor_serial/conveyor_control.py, 저장소 루트) 연동 설정.
+# MOVE는 상대 이동이라 7700 -> 검사장소, 합격 시 추가로 2300 -> 누적 10000 지점.
+# 검사장소 이동 후에는 로봇팔이 바로 검사를 시작해야 해서 완료를 기다리지만(펌웨어가
+# 이동 완료를 시리얼로 알려주지 않아 실측 소요시간+여유로 sleep), 합격 후 2300 이동은
+# 그 뒤에 로봇팔이 할 일이 없어서 완료를 기다리지 않고 그냥 보내기만 한다.
+CONVEYOR_MOVE_TO_INSPECTION_STEPS = 7700
+CONVEYOR_MOVE_TO_INSPECTION_WAIT_SEC = 28.0    # 실측 26.94초 + 여유
+CONVEYOR_MOVE_TO_PASS_STEPS = 2300
+
 
 class JengaInspectorNode(Node):
     def __init__(self):
@@ -94,19 +103,34 @@ class JengaInspectorNode(Node):
         
         # OnRobot RG2 Gripper setup
         self.gripper = RG("rg2", "192.168.1.1", "502")
-        
+
         # YOLO init
         possible_ws_paths = [
             os.path.expanduser("~/ws_cobot2_pjt"),
             os.path.expanduser("~/cobot_ws/src/ws_cobot2_pjt")
         ]
-        
+
         workspace_path = possible_ws_paths[0]
         for path in possible_ws_paths:
             if os.path.exists(os.path.join(path, 'src/yolov8_ws/model/best_3.onnx')):
                 workspace_path = path
                 break
-                
+
+        # 컨베이어 제어(conveyor_serial/conveyor_control.py)는 ROS 패키지가 아니라
+        # 저장소 루트(workspace_path)에 있는 일반 파이썬 모듈이라 sys.path에 추가해서 가져온다.
+        # 시리얼 포트가 없거나(케이블 미연결 등) 열기 실패해도 검사 자체는 계속 되도록
+        # 예외를 여기서 잡고 self.conveyor = None으로 둔다.
+        self.conveyor = None
+        try:
+            conveyor_dir = os.path.join(workspace_path, 'conveyor_serial')
+            if conveyor_dir not in sys.path:
+                sys.path.insert(0, conveyor_dir)
+            from conveyor_control import ConveyorController
+            self.conveyor = ConveyorController()
+            self.get_logger().info("컨베이어 시리얼 연결 완료.")
+        except Exception as e:
+            self.get_logger().error(f"컨베이어 시리얼 연결 실패 - 컨베이어 이동 없이 진행: {e}")
+
         model_path = os.path.join(workspace_path, 'src/yolov8_ws/model/best_3.onnx')
         if not os.path.exists(model_path):
             model_path = os.path.join(workspace_path, 'src/yolov8_ws/model/best_2.onnx')
@@ -997,7 +1021,18 @@ class JengaInspectorNode(Node):
     def _run_inspection_thread(self, request, response):
         """Background thread executing the Jenga inspection and scanning sequence."""
         JReady = [-62.57, 2.16, 76.81, 0.00, 100.99, -62.44]
-        
+
+        # 컨베이어로 검사장소까지 이동시키고, 도착할 때까지 기다린 뒤에 검사를 시작한다.
+        if self.conveyor is not None:
+            self.get_logger().info(
+                f"컨베이어를 검사장소로 이동합니다 (MOVE:{CONVEYOR_MOVE_TO_INSPECTION_STEPS})..."
+            )
+            self.conveyor.move(CONVEYOR_MOVE_TO_INSPECTION_STEPS)
+            time.sleep(CONVEYOR_MOVE_TO_INSPECTION_WAIT_SEC)
+            self.get_logger().info("컨베이어 도착 예상 - 검사를 시작합니다.")
+        else:
+            self.get_logger().warn("컨베이어 미연결 - 이동 없이 바로 검사를 시작합니다.")
+
         # Initialize/Reset states at start of inspection
         self.hand_detected = False
         self.current_hand_pos = None
@@ -1217,6 +1252,14 @@ class JengaInspectorNode(Node):
             image_paths=self.current_inspection_images,
         )
 
+        # 합격이면 컨베이어를 마저 보낸다 - 이후로는 로봇팔이 할 일이 없어서
+        # (검사 실패 시엔 안 보내고, 완료를 기다리지도 않음) 그냥 보내기만 함.
+        if is_pass and self.conveyor is not None:
+            self.get_logger().info(
+                f"검사 합격 - 컨베이어를 마저 이동합니다 (MOVE:{CONVEYOR_MOVE_TO_PASS_STEPS})"
+            )
+            self.conveyor.move(CONVEYOR_MOVE_TO_PASS_STEPS)
+
         # 6. Return back to Home position with safety evasion checks
         self.get_logger().info("Inspection complete. Returning to Home...")
         while rclpy.ok():
@@ -1245,6 +1288,8 @@ class JengaInspectorNode(Node):
 
     def destroy_node(self):
         """Clean up the helper node and executor upon destruction."""
+        if self.conveyor is not None:
+            self.conveyor.close()
         self.action_executor.shutdown()
         self.action_node.destroy_node()
         super().destroy_node()

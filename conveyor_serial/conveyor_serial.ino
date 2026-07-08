@@ -17,8 +17,8 @@ void setup()
     digitalWrite(enablePin, LOW);
     digitalWrite(cmdxPin, HIGH);
 
-    stepperx.setMaxSpeed(200);
-    stepperx.setAcceleration(50);
+    stepperx.setMaxSpeed(400);
+    stepperx.setAcceleration(60);
 }
 
 void handleCommand(String cmd)
