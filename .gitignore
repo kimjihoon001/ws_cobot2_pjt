@@ -20,5 +20,5 @@ frontend/dist/
 
 # backend
 backend/**/__pycache__/
-backend/cobot.db
+
 backend/.secret_key
