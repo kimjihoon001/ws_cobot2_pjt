@@ -96,7 +96,17 @@ class JengaInspectorNode(Node):
         self.gripper = RG("rg2", "192.168.1.1", "502")
         
         # YOLO init
-        workspace_path = "/home/rokey/ws_cobot2_pjt"
+        possible_ws_paths = [
+            os.path.expanduser("~/ws_cobot2_pjt"),
+            os.path.expanduser("~/cobot_ws/src/ws_cobot2_pjt")
+        ]
+        
+        workspace_path = possible_ws_paths[0]
+        for path in possible_ws_paths:
+            if os.path.exists(os.path.join(path, 'src/yolov8_ws/model/best_3.onnx')):
+                workspace_path = path
+                break
+                
         model_path = os.path.join(workspace_path, 'src/yolov8_ws/model/best_3.onnx')
         if not os.path.exists(model_path):
             model_path = os.path.join(workspace_path, 'src/yolov8_ws/model/best_2.onnx')
@@ -432,11 +442,22 @@ class JengaInspectorNode(Node):
         self.get_logger().info("Cleared hand obstacle from planning scene.")
 
     def init_database(self):
-        """Connects to the backend SQLite database (creates table if not exists)."""
-        # 백엔드의 cobot.db 경로 사용
-        db_dir = os.path.expanduser("~/cobot_ws/src/ws_cobot2_pjt/backend")
+        """Connects to the backend SQLite database."""
+        # 백엔드의 cobot.db 경로를 찾습니다 (노트북 환경마다 다를 수 있음)
+        possible_paths = [
+            os.path.expanduser("~/ws_cobot2_pjt/backend"),
+            os.path.expanduser("~/cobot_ws/src/ws_cobot2_pjt/backend")
+        ]
+        
+        db_dir = possible_paths[0]
+        for path in possible_paths:
+            if os.path.exists(path):
+                db_dir = path
+                break
+                
         if not os.path.exists(db_dir):
             os.makedirs(db_dir)
+            
         self.db_path = os.path.join(db_dir, "cobot.db")
         
         conn = sqlite3.connect(self.db_path)
