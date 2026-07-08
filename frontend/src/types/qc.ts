@@ -5,8 +5,13 @@ export interface Inspection {
   product: string
   result: InspectionResult
   defect_location: string | null
-  map_data: string | null
+  map_data: InspectionMapData | null
   created_at: string
+}
+
+export interface InspectionMapData {
+  [floor: string]: ('O' | 'X')[] | string[] | undefined
+  images?: string[]
 }
 
 export interface QcSummary {

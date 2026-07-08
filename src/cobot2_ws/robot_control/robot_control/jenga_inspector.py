@@ -241,12 +241,28 @@ class JengaInspectorNode(Node):
             res = results[0]
             annotated_frame = res.plot()
             
-            # 이미지 저장 (디버깅/보고용)
-            save_dir = os.path.join(os.path.expanduser('~'), 'inspection_images')
+            # 이미지 저장 (백엔드 static 폴더)
+            possible_paths = [
+                os.path.expanduser("~/ws_cobot2_pjt/backend"),
+                os.path.expanduser("~/cobot_ws/src/ws_cobot2_pjt/backend")
+            ]
+            db_dir = possible_paths[0]
+            for p in possible_paths:
+                if os.path.exists(p):
+                    db_dir = p
+                    break
+            
+            save_dir = os.path.join(db_dir, "..", "static", "inspection_images")
             os.makedirs(save_dir, exist_ok=True)
             timestamp = int(time.time() * 1000)
-            filename = os.path.join(save_dir, f"inspection_{face_name}_{pitch_deg}_{timestamp}.jpg")
+            img_filename = f"inspection_{face_name}_{pitch_deg}_{timestamp}.jpg"
+            filename = os.path.join(save_dir, img_filename)
             cv2.imwrite(filename, annotated_frame)
+            
+            if abs(pitch_deg - 45.0) < 1.0:
+                if not hasattr(self, 'current_inspection_images'):
+                    self.current_inspection_images = []
+                self.current_inspection_images.append(f"/static/inspection_images/{img_filename}")
             
             try:
                 img_msg = self.bridge.cv2_to_imgmsg(annotated_frame, "bgr8")
@@ -711,7 +727,15 @@ class JengaInspectorNode(Node):
                 
         self.in_evasion = False
 
-    def log_result_to_db(self, product, result, defect_location, map_data_json):
+    def log_result_to_db(self, product, result, defect_location, map_data_json, image_paths=None):
+        import json
+        if image_paths and len(image_paths) > 0:
+            try:
+                map_dict = json.loads(map_data_json)
+                map_dict["images"] = image_paths
+                map_data_json = json.dumps(map_dict)
+            except Exception:
+                pass
         """Logs inspection result to the database."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()

@@ -58,7 +58,23 @@ export function JengaMapVisualizer({ mapDataStr }: JengaMapProps) {
           )
         })}
       </div>
-      <p className="empty-state" style={{ marginTop: '0' }}>선택된 항목의 6층 젠가 블록 상태입니다.</p>
+      <p className="empty-state" style={{ marginTop: '0', marginBottom: '10px' }}>선택된 항목의 6층 젠가 블록 상태입니다.</p>
+
+      {mapData.images && Array.isArray(mapData.images) && mapData.images.length > 0 && (
+        <div style={{ width: '100%', marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          <h4 style={{ margin: 0, color: 'var(--text-color)', alignSelf: 'flex-start' }}>측면 촬영 이미지</h4>
+          <div style={{ display: 'flex', gap: '10px', overflowX: 'auto', paddingBottom: '10px' }}>
+            {mapData.images.map((imgUrl, idx) => (
+              <img 
+                key={idx} 
+                src={`http://localhost:8000${imgUrl}`} 
+                alt={`Inspection view ${idx}`}
+                style={{ height: '200px', borderRadius: '8px', border: '1px solid var(--border-color)', objectFit: 'cover' }}
+              />
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
