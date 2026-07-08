@@ -347,20 +347,13 @@ class JengaInspectorNode(Node):
         pos_to_idx = {"Left": 0, "Center": 1, "Right": 2}
         mirror_pos = {"Left": "Right", "Center": "Center", "Right": "Left"}
         
-        # 방향에 상관없이(90도 회전 등) YOLO가 찾아낸 구멍(smallhole)을 맵에 모두 반영
-        # Face 0 (Front), Face 1 (Right)는 관측 방향 그대로 반영
-        for face_id in [0, 1]:
-            if face_id in self.inspection_data:
-                for floor, pos in self.inspection_data[face_id]:
-                    if 1 <= floor <= 6:
-                        jenga_map[floor][pos_to_idx[pos]] = "X"
-                        
-        # Face 2 (Back), Face 3 (Left)는 반대편에서 본 것이므로 거울 반전(Mirror) 적용
-        for face_id in [2, 3]:
-            if face_id in self.inspection_data:
-                for floor, pos in self.inspection_data[face_id]:
-                    if 1 <= floor <= 6:
-                        jenga_map[floor][pos_to_idx[mirror_pos[pos]]] = "X"
+        # 방향에 상관없이 YOLO가 찾아낸 구멍을 거울 반전(Mirror) 없이 그대로 맵에 반영합니다.
+        # (양품 템플릿이 좌우 대칭이므로, 보는 방향에 따라 좌우가 뒤바뀌어도 무방하다는 사용자 요청)
+        for face_id, data in self.inspection_data.items():
+            for floor, pos in data:
+                if 1 <= floor <= 6:
+                    jenga_map[floor][pos_to_idx[pos]] = "X"
+
 
         print("\n================ Jenga 6-Floor Map ================")
         print("  [Floor]  [Left]  [Center]  [Right]")

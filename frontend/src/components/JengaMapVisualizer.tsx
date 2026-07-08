@@ -23,9 +23,9 @@ export function JengaMapVisualizer({ mapData }: JengaMapProps) {
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px', marginTop: '20px' }}>
       <h3 style={{ margin: 0, color: 'var(--text-color)' }}>젠가 검사 맵 시각화 (YOLO)</h3>
       <div style={{ display: 'flex', gap: '30px', width: '100%', justifyContent: 'center' }}>
-        {/* Front View */}
+        {/* Face 1 View */}
         <div style={{ padding: '20px', background: 'var(--surface-color)', borderRadius: '12px', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'center' }}>
-          <h4 style={{ margin: '0 0 10px 0', color: 'var(--text-color)' }}>정면 (Front)</h4>
+          <h4 style={{ margin: '0 0 10px 0', color: 'var(--text-color)' }}>면 1 (Face 1)</h4>
           {floors.map((floor) => {
             const floorNum = parseInt(floor)
             const blocks = parsedMapData[floor] || ["O", "O", "O"]
@@ -64,9 +64,9 @@ export function JengaMapVisualizer({ mapData }: JengaMapProps) {
           })}
         </div>
 
-        {/* Side View */}
+        {/* Face 2 View */}
         <div style={{ padding: '20px', background: 'var(--surface-color)', borderRadius: '12px', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'center' }}>
-          <h4 style={{ margin: '0 0 10px 0', color: 'var(--text-color)' }}>측면 (Side)</h4>
+          <h4 style={{ margin: '0 0 10px 0', color: 'var(--text-color)' }}>면 2 (Face 2)</h4>
           {floors.map((floor) => {
             const floorNum = parseInt(floor)
             const blocks = parsedMapData[floor] || ["O", "O", "O"]
@@ -110,13 +110,13 @@ export function JengaMapVisualizer({ mapData }: JengaMapProps) {
       {parsedMapData.images && Array.isArray(parsedMapData.images) && parsedMapData.images.length > 0 && (
         <div style={{ width: '100%', marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
           <h4 style={{ margin: 0, color: 'var(--text-color)', alignSelf: 'flex-start' }}>측면 촬영 이미지</h4>
-          <div style={{ display: 'flex', gap: '10px', overflowX: 'auto', paddingBottom: '10px' }}>
+          <div style={{ display: 'flex', gap: '15px', overflowX: 'auto', paddingBottom: '15px' }}>
             {parsedMapData.images.map((imgUrl, idx) => (
               <img 
                 key={idx} 
                 src={imgUrl}
                 alt={`Inspection view ${idx}`}
-                style={{ height: '200px', borderRadius: '8px', border: '1px solid var(--border-color)', objectFit: 'cover' }}
+                style={{ height: '400px', borderRadius: '8px', border: '1px solid var(--border-color)', objectFit: 'cover', flexShrink: 0 }}
               />
             ))}
           </div>
