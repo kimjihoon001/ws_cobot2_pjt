@@ -7,7 +7,8 @@ from ament_index_python.packages import get_package_share_directory
 PACKAGE_NAME = "voice_processing"
 PACKAGE_PATH = get_package_share_directory(PACKAGE_NAME)
 
-MODEL_NAME = "hey_jarvis"
+MODEL_NAME = "hello_rokey_8332_32"
+MODEL_PATH = os.path.join(PACKAGE_PATH, "resource", f"{MODEL_NAME}.tflite")
 
 class WakeupWord:
     def __init__(self, buffer_size):
@@ -32,5 +33,5 @@ class WakeupWord:
         return False
 
     def set_stream(self, stream):
-        self.model = Model(wakeword_models=[self.model_name])
+        self.model = Model(wakeword_models=[MODEL_PATH])
         self.stream = stream

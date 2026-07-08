@@ -1,4 +1,5 @@
 import { useVoiceBridge } from '../hooks/useVoiceBridge'
+import { VoiceStartButton } from '../components/VoiceStartButton'
 
 const JOINTS = [
   { name: 'joint_1', angle: '-' },
@@ -20,10 +21,17 @@ const CONTROL_BUTTONS = [
 ] as const
 
 export function WorkSessionPage() {
-  const { connected, pending, respond } = useVoiceBridge()
+  const { connected, pending, pendingRelease, respond, respondRelease } = useVoiceBridge()
 
   return (
     <div>
+      <div className="task-status-row">
+        <div className="stat-tile stat-tile-large">
+          <div className="stat-tile-label">음성 명령</div>
+          <VoiceStartButton />
+        </div>
+      </div>
+
       <div className="control-grid">
         {CONTROL_BUTTONS.map(({ label, variant }) => (
           <button
@@ -74,6 +82,26 @@ export function WorkSessionPage() {
         </div>
       </div>
       <p className="empty-state">보이스 명령/ROS2 브릿지 연동 후 실제 작업 정보가 여기에 표시됩니다.</p>
+
+      {pendingRelease && (
+        <div className="task-status-row">
+          <div className="stat-tile stat-tile-large">
+            <div className="stat-tile-label">배송 확인</div>
+            <div className="stat-tile-value" style={{ fontSize: 22 }}>
+              도구를 받으셨나요? (
+              {pendingRelease.tools.map((t, i) => `${t} → ${pendingRelease.targets[i]}`).join(', ')})
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+              <button type="button" className="primary-btn" onClick={() => respondRelease(true)}>
+                확인
+              </button>
+              <button type="button" className="text-btn" onClick={() => respondRelease(false)}>
+                아니오
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="task-status-row">
         <div className="stat-tile stat-tile-large">

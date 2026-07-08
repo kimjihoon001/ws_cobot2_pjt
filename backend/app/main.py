@@ -6,7 +6,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from .database import Base, engine
-from .routers import auth, qc, resources, users
+from .routers import auth, qc, resources, robot, users, voice
 from . import ros_bridge
 
 Base.metadata.create_all(bind=engine)
@@ -37,6 +37,8 @@ app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(resources.router)
 app.include_router(qc.router)
+app.include_router(voice.router)
+app.include_router(robot.router)
 
 
 @app.get("/api/health")
@@ -47,6 +49,12 @@ def health_check():
 @app.get("/api/voice/pending")
 def voice_pending():
     pending = ros_bridge._bridge.get_pending_payload() if ros_bridge._bridge else None
+    return {"pending": pending}
+
+
+@app.get("/api/voice/pending_release")
+def voice_pending_release():
+    pending = ros_bridge._bridge.get_pending_release_payload() if ros_bridge._bridge else None
     return {"pending": pending}
 
 
@@ -66,6 +74,8 @@ async def websocket_endpoint(ws: WebSocket):
                 continue
             if msg.get("cmd") == "confirm_response":
                 ros_bridge._bridge.resolve_pending(bool(msg.get("confirmed", False)))
+            elif msg.get("cmd") == "release_response":
+                ros_bridge._bridge.resolve_pending_release(bool(msg.get("confirmed", False)))
     except WebSocketDisconnect:
         pass
     finally:

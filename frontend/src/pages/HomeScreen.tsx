@@ -3,6 +3,7 @@ import * as resourcesApi from '../api/resources'
 import * as qcApi from '../api/qc'
 import type { Summary } from '../types/resource'
 import type { QcSummary } from '../types/qc'
+import { VoiceStartButton } from '../components/VoiceStartButton'
 
 type Screen = 'inventory' | 'qc' | 'robot' | 'work' | 'users'
 
@@ -26,6 +27,9 @@ export function HomeScreen({
       <div className="launcher-head">
         <h1>무엇을 하시겠어요?</h1>
         <p>모듈을 선택하면 화면이 전환됩니다.</p>
+        <div style={{ marginTop: 16 }}>
+          <VoiceStartButton />
+        </div>
       </div>
 
       <div className="tile-grid">
