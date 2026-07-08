@@ -150,6 +150,13 @@ export function InventoryPage({ canManage }: { canManage: boolean }) {
 
   const categories = Array.from(new Set(resources.map((r) => r.category).filter(Boolean)))
 
+  const orderMap: Record<string, number> = {
+    '기본형': 1,
+    'A형': 2,
+    'B형': 3,
+    'C형': 4
+  }
+
   const categoryChartData = categories
     .map((cat) => ({
       label: cat,
@@ -157,7 +164,12 @@ export function InventoryPage({ canManage }: { canManage: boolean }) {
         .filter((r) => r.category === cat)
         .reduce((sum, r) => sum + r.quantity, 0),
     }))
-    .sort((a, b) => b.value - a.value)
+    .sort((a, b) => {
+      const orderA = orderMap[a.label] || 99
+      const orderB = orderMap[b.label] || 99
+      if (orderA === 99 && orderB === 99) return a.label.localeCompare(b.label)
+      return orderA - orderB
+    })
 
   const sortedResources = sortBy(resources, sortKey, sortDir)
   const pagedResources = sortedResources.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)

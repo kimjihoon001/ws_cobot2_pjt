@@ -107,7 +107,7 @@ def delete_resource(db: Session, resource: models.Resource, username: str) -> No
 
 def get_summary(db: Session) -> schemas.SummaryOut:
     resources = db.query(models.Resource).all()
-    total = len(resources)
+    total = sum(r.quantity for r in resources)
     normal = sum(1 for r in resources if r.status == "normal")
     low = sum(1 for r in resources if r.status == "low")
     out = sum(1 for r in resources if r.status == "out")

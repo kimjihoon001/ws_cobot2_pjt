@@ -4,6 +4,7 @@ import type { Inspection, InspectionResult, QcSummary, QcTrendPoint } from '../t
 import { QcTrendChart } from '../components/charts/QcTrendChart'
 import { Pagination } from '../components/Pagination'
 import { SortableTh } from '../components/SortableTh'
+import { JengaMapVisualizer } from '../components/JengaMapVisualizer'
 import { downloadCsv } from '../utils/csv'
 import { sortBy } from '../utils/sort'
 import type { SortDir } from '../utils/sort'
@@ -23,6 +24,7 @@ export function QcPage() {
   const [sortDir, setSortDir] = useState<SortDir>('desc')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [selectedInspection, setSelectedInspection] = useState<Inspection | null>(null)
 
   const refresh = useCallback(async () => {
     try {
@@ -151,8 +153,13 @@ export function QcPage() {
                 pagedInspections.map((row) => {
                   const color =
                     row.result === 'pass' ? 'var(--status-good)' : 'var(--status-critical)'
+                  const isSelected = selectedInspection?.id === row.id
                   return (
-                    <tr key={row.id}>
+                    <tr 
+                      key={row.id} 
+                      onClick={() => setSelectedInspection(row)}
+                      style={{ cursor: 'pointer', background: isSelected ? 'color-mix(in srgb, var(--primary-color) 10%, transparent)' : undefined }}
+                    >
                       <td>{new Date(row.created_at).toLocaleString()}</td>
                       <td>{row.product}</td>
                       <td>
@@ -183,8 +190,14 @@ export function QcPage() {
         </>
       )}
 
-      <div className="qc-image-placeholder">검사 이미지 없음</div>
-      <p className="empty-state">YOLO 불량 위치 인식 연동 후, 검사 이미지 위에 불량 위치가 표시됩니다.</p>
+      {selectedInspection ? (
+        <JengaMapVisualizer mapDataStr={selectedInspection.map_data} />
+      ) : (
+        <>
+          <div className="qc-image-placeholder">항목을 선택하세요</div>
+          <p className="empty-state">테이블에서 검사 기록을 클릭하면 맵 데이터가 시각화됩니다.</p>
+        </>
+      )}
     </div>
   )
 }

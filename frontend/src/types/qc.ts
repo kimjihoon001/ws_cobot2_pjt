@@ -5,6 +5,7 @@ export interface Inspection {
   product: string
   result: InspectionResult
   defect_location: string | null
+  map_data: string | null
   created_at: string
 }
 

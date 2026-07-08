@@ -668,9 +668,37 @@ class JengaInspectorNode(Node):
             "INSERT INTO inspection_results (product, result, defect_location, map_data) VALUES (?, ?, ?, ?)",
             (product, result.lower(), defect_location, map_data_json)
         )
+        
+        # 정상 제품(PASS)일 경우 재고(resources) 추가 및 로그 기록
+        if result.lower() == 'pass':
+            # 해당 상품명으로 재고가 있는지 확인
+            cursor.execute("SELECT quantity FROM resources WHERE name = ?", (product,))
+            row = cursor.fetchone()
+            
+            if row:
+                # 이미 있으면 수량 + 1
+                cursor.execute("UPDATE resources SET quantity = quantity + 1, updated_at = CURRENT_TIMESTAMP WHERE name = ?", (product,))
+                # 카테고리 추출
+                category_name = '기본형'
+                if 'A형' in product: category_name = 'A형'
+                elif 'B형' in product: category_name = 'B형'
+                elif 'C형' in product: category_name = 'C형'
+                
+                # 없으면 새로 등록
+                cursor.execute(
+                    "INSERT INTO resources (name, item_type, category, quantity, unit, min_quantity, location) VALUES (?, 'product', ?, 1, 'EA', 0, '출하 대기장')",
+                    (product, category_name)
+                )
+                
+            # 인벤토리 로그 남기기
+            cursor.execute(
+                "INSERT INTO inventory_logs (resource_name, action, detail, username) VALUES (?, 'add', '품질 검사 통과 (자동 입고)', 'System')",
+                (product,)
+            )
+
         conn.commit()
         conn.close()
-        self.get_logger().info(f"Logged result '{result}' to database.")
+        self.get_logger().info(f"Logged result '{result}' to database. Inventory updated if PASS.")
 
     def get_robot_pose_matrix(self, x, y, z, qx, qy, qz, qw):
         R = Rotation.from_quat([qx, qy, qz, qw]).as_matrix()
@@ -1110,8 +1138,9 @@ class JengaInspectorNode(Node):
         if not is_pass and len(failed_reasons) > 0:
             defect_loc = failed_reasons[0]
 
-        # 백엔드 모델에 맞춰 DB에 저장 (product는 임의로 "Jenga" 지정)
-        self.log_result_to_db("Jenga", final_result, defect_loc, map_data_json)
+        # 백엔드 모델에 맞춰 DB에 저장 (정상 제품일 경우 몇형 제품인지 저장, 아닐 경우 불량품 표기)
+        product_name_for_db = self.final_matched_product if is_pass else "알 수 없는 패턴 (불량품)"
+        self.log_result_to_db(product_name_for_db, final_result, defect_loc, map_data_json)
 
         # 6. Return back to Home position with safety evasion checks
         self.get_logger().info("Inspection complete. Returning to Home...")
