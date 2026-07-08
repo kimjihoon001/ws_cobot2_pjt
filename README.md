@@ -65,15 +65,10 @@ ros2 launch m0609_rg2_bringup bringup_camera.launch.py mode:=real host:=192.168.
 ```bash
 cd ~/ws_cobot2_pjt && source install/setup.bash
 ros2 launch m0609_rg2_moveit movegroup_only.launch.py
+
 ```
 
-### 터미널 4: OnRobot RG2 그리퍼 드라이버 기동
-```bash
-cd ~/ws_cobot2_pjt && source install/setup.bash
-ros2 launch onrobot_rg_ros2 bringup.launch.py ip:=192.168.1.1
-```
-
-### 터미널 5: YOLO 파지 스크립트 실행
+### 터미널 4: YOLO 파지 스크립트 실행
 ```bash
 cd ~/ws_cobot2_pjt && source install/setup.bash
 python3 src/cobot2_ws/m0609_rg2_bringup/scripts/tool_pick_yolo_target.py
