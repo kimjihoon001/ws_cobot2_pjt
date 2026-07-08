@@ -22,3 +22,7 @@ frontend/dist/
 backend/**/__pycache__/
 
 backend/.secret_key
+backend/static/inspection_images/
+
+# Legacy inspection image output
+static/inspection_images/

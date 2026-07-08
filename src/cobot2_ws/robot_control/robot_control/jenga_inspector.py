@@ -252,16 +252,16 @@ class JengaInspectorNode(Node):
                     db_dir = p
                     break
             
-            save_dir = os.path.join(db_dir, "..", "static", "inspection_images")
+            save_dir = os.path.join(db_dir, "static", "inspection_images")
             os.makedirs(save_dir, exist_ok=True)
             timestamp = int(time.time() * 1000)
             img_filename = f"inspection_{face_name}_{pitch_deg}_{timestamp}.jpg"
             filename = os.path.join(save_dir, img_filename)
-            cv2.imwrite(filename, annotated_frame)
+            image_saved = cv2.imwrite(filename, annotated_frame)
+            if not image_saved:
+                self.get_logger().error(f"검출 이미지 저장 실패: {filename}")
             
-            if abs(pitch_deg - 45.0) < 1.0:
-                if not hasattr(self, 'current_inspection_images'):
-                    self.current_inspection_images = []
+            if image_saved and abs(pitch_deg - 45.0) < 1.0:
                 self.current_inspection_images.append(f"/static/inspection_images/{img_filename}")
             
             try:
@@ -1132,6 +1132,7 @@ class JengaInspectorNode(Node):
             scan_targets.append((idx2, face_names[idx2], p, joints))
 
         self.inspection_data = {}
+        self.current_inspection_images = []
         face_results_buffer = {idx1: [], idx2: []}
 
         # Iterate targets with safety loop
@@ -1215,7 +1216,13 @@ class JengaInspectorNode(Node):
 
         # 백엔드 모델에 맞춰 DB에 저장 (정상 제품일 경우 몇형 제품인지 저장, 아닐 경우 불량품 표기)
         product_name_for_db = self.final_matched_product if is_pass else "알 수 없는 패턴 (불량품)"
-        self.log_result_to_db(product_name_for_db, final_result, defect_loc, map_data_json)
+        self.log_result_to_db(
+            product_name_for_db,
+            final_result,
+            defect_loc,
+            map_data_json,
+            image_paths=self.current_inspection_images,
+        )
 
         # 6. Return back to Home position with safety evasion checks
         self.get_logger().info("Inspection complete. Returning to Home...")
