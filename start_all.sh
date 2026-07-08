@@ -28,11 +28,12 @@ ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-70}"
 LAYOUT_GENERATOR="$WS_DIR/scripts/gen_terminator_layout.py"
 PICK_SCRIPT="$WS_DIR/src/cobot2_ws/m0609_rg2_bringup/scripts/tool_pick_yolo_target.py"
 ENV_FILE="$WS_DIR/src/cobot2_ws/voice_processing/resource/.env"
+CONVEYOR_SCRIPT="$WS_DIR/conveyor_serial/conveyor_control.py"
 LAYOUT_FILE="/tmp/cobot_all_terminator_layout.conf"
 TERMINATOR_LOG="/tmp/cobot_all_terminator.log"
 ROS_ENV="export ROS_DOMAIN_ID=$ROS_DOMAIN_ID && source /opt/ros/humble/setup.bash && source $WS_DIR/install/setup.bash"
 
-for required_file in "$LAYOUT_GENERATOR" "$PICK_SCRIPT" "$ENV_FILE"; do
+for required_file in "$LAYOUT_GENERATOR" "$PICK_SCRIPT" "$ENV_FILE" "$CONVEYOR_SCRIPT"; do
   if [ ! -f "$required_file" ]; then
     echo "❌ 필수 파일을 찾을 수 없습니다: $required_file"
     exit 1
@@ -53,7 +54,7 @@ python3 "$LAYOUT_GENERATOR" "$LAYOUT_FILE" \
   "8-Frontend"       "$(wrap 'HMI 프론트엔드 구동 중...' "cd $WS_DIR/frontend && npm run dev -- --host 0.0.0.0 --port 5173")" \
   "9-get_keyword"    "$(wrap '음성 키워드 노드 대기 중 (8초)...' "sleep 8; $ROS_ENV && ros2 run voice_processing get_keyword")" \
   "10-Tool-Pick"     "$(wrap '공구 픽업 노드 대기 중 (10초)...' "sleep 10; $ROS_ENV && python3 $PICK_SCRIPT")" \
-  "11-Monitor"       "$(wrap 'ROS 상태 확인 터미널' "$ROS_ENV")"
+  "11-Monitor"       "$(wrap 'ROS 상태 확인 + 컨베이어 시리얼 수동 제어' "$ROS_ENV && cd $WS_DIR/conveyor_serial && python3 conveyor_control.py")"
 
 echo "🚀 통합 시스템을 Terminator 12분할로 실행합니다..."
 terminator --no-dbus --maximise -g "$LAYOUT_FILE" -l main >"$TERMINATOR_LOG" 2>&1 &
