@@ -46,6 +46,12 @@ export function QcPage() {
 
   useEffect(() => {
     refresh()
+    
+    const interval = setInterval(() => {
+      refresh()
+    }, 3000)
+    
+    return () => clearInterval(interval)
   }, [refresh])
 
   useEffect(() => {
