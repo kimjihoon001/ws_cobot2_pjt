@@ -441,6 +441,8 @@ class JengaInspectorNode(Node):
         
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
+        
+        # 1. inspection_results 테이블 생성
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS inspection_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -451,6 +453,35 @@ class JengaInspectorNode(Node):
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        # 2. resources 테이블 생성 (백엔드 미가동 시 OperationalError 방지)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS resources (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name VARCHAR(100) NOT NULL,
+                item_type VARCHAR(20) NOT NULL DEFAULT 'material',
+                category VARCHAR(50) NOT NULL DEFAULT '',
+                quantity INTEGER NOT NULL DEFAULT 0,
+                unit VARCHAR(20) NOT NULL DEFAULT 'EA',
+                min_quantity INTEGER NOT NULL DEFAULT 0,
+                location VARCHAR(100) NOT NULL DEFAULT '',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # 3. inventory_logs 테이블 생성 (백엔드 미가동 시 OperationalError 방지)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS inventory_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                resource_name VARCHAR(100) NOT NULL,
+                action VARCHAR(20) NOT NULL,
+                detail VARCHAR(255) NOT NULL DEFAULT '',
+                username VARCHAR(50) NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
         conn.commit()
         conn.close()
         self.get_logger().info(f"Database initialized at {self.db_path}")
