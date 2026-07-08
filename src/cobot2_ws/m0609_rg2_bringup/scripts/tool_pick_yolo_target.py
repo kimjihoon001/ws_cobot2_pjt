@@ -20,12 +20,14 @@ from moveit_msgs.srv import GetPositionIK, GetCartesianPath
 from shape_msgs.msg import SolidPrimitive, Mesh, MeshTriangle
 from geometry_msgs.msg import Pose, PoseStamped, Point
 from sensor_msgs.msg import Image, CameraInfo, JointState
+from std_msgs.msg import String
 from cv_bridge import CvBridge
 from ultralytics import YOLO
 
 import tf2_ros
 from tf2_geometry_msgs import do_transform_pose
 from onrobot_rg_msgs.srv import SetCommand
+from od_msg.srv import ConfirmTools, ListenYesNo
 
 # 최종 하강(grasp)은 관절공간 IK 이동 대신 MoveIt Cartesian Path
 # (compute_cartesian_path + ExecuteTrajectory)로 처리 — pregrasp/grasp를 각각
@@ -78,6 +80,23 @@ TILT_CANDIDATES = [
 # 매 실행 시작 시 이동할 홈 자세(관절, degree). robot_control.py의 init_robot()에
 # 있는 범용 JReady와 동일값 (jenga_inspector.py의 JReady는 젠가 스캔 전용 포즈라 다름).
 HOME_JOINTS_DEG = [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]
+
+# 도구 스캔 위치 (두산 티칭펜던트 실측, 2026-07-08). 홈에서 바로 탐지하는 대신
+# 이 자세로 이동한 뒤 YOLO 탐지를 시작한다.
+TOOL_SCAN_JOINTS_DEG = [-3.66, 36.73, 42.87, 0.13, 100.66, -4.39]
+
+# 도구별 배송 위치 (관절, degree). 해머는 펜던트 실측값, 스크류드라이버는 실측
+# 사진이 없어 해머 위치에서 J1을 대략 -15도 옮긴 값 — 실기에서 재조정 필요.
+TOOL_DELIVERY_JOINTS_DEG = {
+    'tool-hammer': [26.36, 41.71, 44.70, 7.01, 49.04, -4.39],
+    'screw2': [11.36, 41.71, 44.70, 7.01, 49.04, -4.39],
+}
+
+# get_keyword.py가 쓰는 도구 이름(음성/제품 매핑 기준) -> YOLO 클래스 이름 변환
+VOICE_TOOL_TO_CLASS = {
+    'hammer': 'tool-hammer',
+    'screwdriver': 'screw2',
+}
 
 # move_group만 단독 실행(moveit_camera.launch.py)할 때는 controller_manager가
 # 없어 실제 Execute/그리퍼 서비스가 불가하므로 기본값 True/False.
@@ -284,6 +303,14 @@ class PickYoloTarget(Node):
         self.current_hand_pos = None
         self.create_subscription(Point, '/hand_position', self._hand_position_cb, 10)
 
+        # /get_keyword 호출은 이제 백엔드(ros_bridge.py, HMI '음성 시작' 버튼)가 클라이언트로
+        # 담당하고, 응답이 오면 이 토픽으로 "tool:target tool2:target2" 형식 메시지를 발행한다.
+        # 여기서는 그 결과만 받아서 픽업을 시작 - 서비스 대신 토픽인 이유: run()이 기존처럼
+        # rclpy.spin_once를 수동으로 돌리는 단일 스레드 구조라, 콜백 안에서 다시 spin_once를
+        # 부르면(executor 재진입) 데드락/예외 위험이 있음 - 토픽 구독은 기존 패턴 그대로 안전함.
+        self._pending_tools_message = None
+        self.create_subscription(String, '/pick_task_tools', self._pick_task_tools_cb, 10)
+
         # YOLO 탐지 시각화 이미지 퍼블리셔 (rqt_image_view로 확인)
         self._vis_pub = self.create_publisher(Image, '/yolo_detection/image', 1)
 
@@ -326,6 +353,19 @@ class PickYoloTarget(Node):
         self.get_logger().info('/execute_trajectory 대기중...')
         while not self._execute_ac.wait_for_server(timeout_sec=1.0):
             self.get_logger().info('  ... /execute_trajectory 응답 없음, 재시도 중...')
+            rclpy.spin_once(self, timeout_sec=0.1)
+
+        # 배송 완료 확인(HMI 확인/아니오, voice_processing 음성 예/아니오) 클라이언트
+        self._confirm_release_cli = self.create_client(ConfirmTools, '/confirm_release')
+        self.get_logger().info('/confirm_release 대기중...')
+        while not self._confirm_release_cli.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('  ... /confirm_release 응답 없음, 재시도 중...')
+            rclpy.spin_once(self, timeout_sec=0.1)
+
+        self._listen_confirmation_cli = self.create_client(ListenYesNo, '/listen_confirmation')
+        self.get_logger().info('/listen_confirmation 대기중...')
+        while not self._listen_confirmation_cli.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('  ... /listen_confirmation 응답 없음, 재시도 중...')
             rclpy.spin_once(self, timeout_sec=0.1)
 
         self.get_logger().info('준비 완료')
@@ -425,9 +465,11 @@ class PickYoloTarget(Node):
         msg.data = vis_u8.tobytes()
         self._vis_pub.publish(msg)
 
-    def detect_once(self, timeout_sec=DETECT_TIMEOUT_SEC):
+    def detect_once(self, target_class=None, timeout_sec=DETECT_TIMEOUT_SEC):
         """color/depth/intrinsics가 갖춰지면, 화면에 보이는 픽업 대상(KEYPOINT_AXIS_ROLE에
-        등록된 클래스) 중 최고 confidence 탐지 1건을 클래스 구분 없이 반환."""
+        등록된 클래스) 중 최고 confidence 탐지 1건을 반환. target_class가 주어지면
+        그 클래스만 후보로 필터링(음성으로 특정 도구를 지정받았을 때 사용), None이면
+        기존처럼 등록된 아무 클래스나 최고 confidence로 고른다."""
         deadline = time.monotonic() + timeout_sec
         while rclpy.ok() and time.monotonic() < deadline:
             rclpy.spin_once(self, timeout_sec=0.1)
@@ -443,6 +485,8 @@ class PickYoloTarget(Node):
                     continue
                 class_name = CLASS_NAMES.get(int(label), f'class_{int(label)}')
                 if class_name not in KEYPOINT_AXIS_ROLE:
+                    continue
+                if target_class is not None and class_name != target_class:
                     continue
                 if best is None or score > best[0]:
                     best = (score, box_xyxy, idx, class_name)
@@ -924,78 +968,83 @@ class PickYoloTarget(Node):
             time.sleep(0.1)
         self.get_logger().info(f"물체 '{obj_id}' 그리퍼에 부착 완료")
 
-    def monitor_hand_proximity_and_release(self) -> bool:
-        """pregrasp 대기 상태에서 hand_obstacle_publisher가 발행하는 3D 손 위치 좌표와
-        그리퍼 팁(rg2_tcp)의 실시간 거리를 비교하여 15cm 이내로 좁혀지면 그리퍼를 엽니다."""
-        # 15cm 이내 접근 시 전달 트리거
+    def wait_for_release(self, tool_name, target) -> bool:
+        """배송 위치 도착 후 그리퍼를 열 신호를 기다린다. 셋 중 아무거나 먼저 오면 릴리즈:
+        1) hand_obstacle_publisher 기준 손 근접(15cm, 기존 로직)
+        2) HMI 확인/아니오 (/confirm_release) - confirmed=True일 때만 릴리즈
+        3) 음성 예/아니오 (/listen_confirmation, voice_processing) - confirmed=True일 때만 릴리즈
+        confirmed=False(아니오)는 릴리즈 트리거가 아니라 "아직 아니다"로 간주하고 계속 대기."""
         HAND_PROXIMITY_THRESHOLD = 0.15
 
         self.get_logger().info(
-            f"사용자 손 접근 대기 시작 (거리 임계치: {HAND_PROXIMITY_THRESHOLD} m, 제한시간: {FORCE_MONITORING_TIMEOUT}초)..."
+            f"배송 완료 대기 시작 ({tool_name} -> {target}, 손 접근/HMI확인/음성확인 중 먼저 오는 것 사용, "
+            f"제한시간: {FORCE_MONITORING_TIMEOUT}초)..."
         )
         start_time = self.get_clock().now()
 
         # 안정적인 토픽 수신을 위한 대기
         time.sleep(1.0)
-        
-        # ROS 2 토픽 최신 갱신을 위해 spin_once 강제
         for _ in range(5):
             rclpy.spin_once(self, timeout_sec=0.05)
+
+        release_req = ConfirmTools.Request()
+        release_req.tools = [tool_name]
+        release_req.targets = [target]
+        release_future = self._confirm_release_cli.call_async(release_req)
+
+        listen_future = self._listen_confirmation_cli.call_async(ListenYesNo.Request())
 
         while rclpy.ok():
             current_time = self.get_clock().now()
             duration = (current_time - start_time).nanoseconds / 1e9
             if duration > FORCE_MONITORING_TIMEOUT:
-                self.get_logger().info("사용자 손 접근 대기 제한시간 초과. 프로세스를 정상 종료합니다.")
+                self.get_logger().info("배송 완료 대기 제한시간 초과. 다음 단계로 진행합니다.")
                 return False
 
-            # spin_once를 실행하여 손 위치 토픽 콜백 구동
             rclpy.spin_once(self, timeout_sec=0.01)
 
-            if self.current_hand_pos is None:
-                self.get_logger().info("손 위치 데이터(/hand_position) 수신 대기 중...", once=True)
-                time.sleep(0.1)
-                continue
+            # 2) HMI 확인/아니오
+            if release_future.done():
+                result = release_future.result()
+                if result is not None and result.confirmed:
+                    self.get_logger().info("HMI 확인으로 그리퍼를 열어 공구를 전달합니다.")
+                    self.gripper_command('o')
+                    return True
+                # 아니오/응답없음이면 재요청해서 계속 대기 (한 번 소모됐으니 다시 물어봄)
+                release_future = self._confirm_release_cli.call_async(release_req)
 
-            # 실시간 TCP 위치 획득
-            tcp_xyz = self.get_current_tcp_pose_tf()
-            if tcp_xyz is None:
-                self.get_logger().warn("실시간 TCP TF 획득 실패. 재시도합니다.")
-                time.sleep(0.1)
-                continue
+            # 3) 음성 예/아니오
+            if listen_future.done():
+                result = listen_future.result()
+                if result is not None and result.heard and result.confirmed:
+                    self.get_logger().info("음성 확인으로 그리퍼를 열어 공구를 전달합니다.")
+                    self.gripper_command('o')
+                    return True
+                listen_future = self._listen_confirmation_cli.call_async(ListenYesNo.Request())
 
-            # 직선 거리(유클리드 거리) 계산
-            dx = self.current_hand_pos[0] - tcp_xyz[0]
-            dy = self.current_hand_pos[1] - tcp_xyz[1]
-            dz = self.current_hand_pos[2] - tcp_xyz[2]
-            dist = np.sqrt(dx**2 + dy**2 + dz**2)
-
-            self.get_logger().info(
-                f"작업자 손과의 거리: {dist:.3f} m (손: x={self.current_hand_pos[0]:.2f}, y={self.current_hand_pos[1]:.2f}, z={self.current_hand_pos[2]:.2f} / TCP: x={tcp_xyz[0]:.2f}, y={tcp_xyz[1]:.2f}, z={tcp_xyz[2]:.2f})"
-            )
-
-            if dist < HAND_PROXIMITY_THRESHOLD:
-                self.get_logger().info(
-                    f"⚠️ 작업자 손 근접 감지! (거리: {dist:.3f} m <= {HAND_PROXIMITY_THRESHOLD} m) 그리퍼를 열어 공구를 안전하게 전달합니다!"
-                )
-                self.gripper_command('o')
-                return True
+            # 1) 손 근접 (기존 로직)
+            if self.current_hand_pos is not None:
+                tcp_xyz = self.get_current_tcp_pose_tf()
+                if tcp_xyz is not None:
+                    dx = self.current_hand_pos[0] - tcp_xyz[0]
+                    dy = self.current_hand_pos[1] - tcp_xyz[1]
+                    dz = self.current_hand_pos[2] - tcp_xyz[2]
+                    dist = np.sqrt(dx**2 + dy**2 + dz**2)
+                    if dist < HAND_PROXIMITY_THRESHOLD:
+                        self.get_logger().info(
+                            f"작업자 손 근접 감지! (거리: {dist:.3f} m) 그리퍼를 열어 공구를 전달합니다."
+                        )
+                        self.gripper_command('o')
+                        return True
 
             time.sleep(0.1)
 
         return False
 
-    def run(self):
-        self.get_logger().info('홈 자세로 이동 중...')
-        self.move_to_joints([math.radians(d) for d in HOME_JOINTS_DEG])
-
-        targets_label = '/'.join(KEYPOINT_AXIS_ROLE.keys())
-        self.get_logger().info(f'{targets_label} 탐지 대기중...')
-        detection = self.detect_once()
-        if detection is None:
-            self.get_logger().error('타겟을 찾지 못함 (타임아웃)')
-            return
-
+    def pick_detected_tool(self, detection, delivery_joints_deg) -> bool:
+        """detect_once()가 찾은 대상 하나를 집어서 delivery_joints_deg 자세까지 옮긴다.
+        기존 run()의 탐지 이후~pick 완료 로직을 그대로 재사용(mesh 스폰, pregrasp/grasp,
+        attach)하고 마지막에 pregrasp로 복귀하는 대신 지정된 배송 자세로 이동한다."""
         cx, cy, depth_m, head_px, tail_px, detected_class = detection
         x, y, z = self.pixel_to_base_xyz(cx, cy, depth_m)
         axis_angle, yaw = self.axis_yaw(head_px, tail_px)
@@ -1033,7 +1082,7 @@ class PickYoloTarget(Node):
                 detected_xyz=(x, y, z))
         else:
             self.get_logger().error(f'미지원 detected_class: {detected_class}')
-            return
+            return False
 
         mesh_msg = None
         try:
@@ -1047,39 +1096,97 @@ class PickYoloTarget(Node):
         pregrasp_joints = self.solve_ik(x, y, z + PREGRASP_Z_OFFSET, yaw)
         if pregrasp_joints is None:
             self.get_logger().error('pregrasp 포즈에 대한 IK 해를 찾지 못했습니다. 기동을 취소합니다.')
-            return
+            return False
 
         if not self.gripper_command('o'):
-            return
+            return False
         if not self.move_to_joints(pregrasp_joints):
-            return
+            return False
 
         # 최종 하강: move_cartesian_grasp()가 순수 수직 Cartesian 직선 하강을 우선
         # 시도하고, 특이점 때문에 안 되면 자세는 그대로(수직) 유지한 채 관절공간
         # IK로 폴백한다 (자세하강 참고: move_cartesian_grasp 문서 주석).
         if not self.move_cartesian_grasp(x, y, z + GRASP_Z_CLEARANCE, yaw, seed_joints=pregrasp_joints):
             self.get_logger().error('Cartesian 하강 실패. 기동을 취소합니다.')
-            return
+            return False
 
         if not self.gripper_command('c'):
-            return
+            return False
 
         # 그리퍼를 닫은 후, 월드(base_link)에 있던 장애물을 그리퍼 프레임으로 리어태치
         self.attach_object_to_gripper(obj_id, mesh_msg, gripper_position, gripper_quat)
         time.sleep(0.5)
         self.move_to_joints(pregrasp_joints)
-        self.get_logger().info('pick 완료')
+        self.get_logger().info('pick 완료 - 배송 위치로 이동')
+        self.move_to_joints([math.radians(d) for d in delivery_joints_deg])
+        return True
 
-        # [HRI 비전 손 감지 연동]: 공구를 들어 올린 후 정지 대기 상태에서 
-        # 사용자의 손이 15cm 이내로 가까워지면 자동으로 그리퍼를 열어 전달함
-        released = self.monitor_hand_proximity_and_release()
-        if released:
-            self.get_logger().info('사용자 손 접근 확인으로 인해 안전하게 공구를 전달하고 작업을 종료합니다.')
-        else:
-            self.get_logger().info('손 감지 대기 종료. 정상 프로세스를 종료합니다.')
-        
-        # 동작 종료 후 씬 잔해 청소
-        self.clear_hand_obstacle()
+    def _pick_task_tools_cb(self, msg):
+        self._pending_tools_message = msg.data
+
+    def run(self):
+        """백엔드(ros_bridge.py, HMI '음성 시작' 버튼)가 /get_keyword를 호출해서 확정한
+        도구 목록이 /pick_task_tools 토픽으로 올 때까지 대기하다가, 오면 perform_pick_task()를
+        한 번 실행하고 다시 대기 상태로 돌아간다. (YOLO 모델을 매번 다시 로드하지 않도록
+        프로세스는 계속 띄워두고 반복 트리거만 받음)"""
+        self.get_logger().info('/pick_task_tools 대기 중 (HMI 음성 시작 버튼 -> get_keyword 확정 결과로 트리거됨)...')
+        while rclpy.ok():
+            rclpy.spin_once(self, timeout_sec=0.2)
+            if self._pending_tools_message is not None:
+                tools_message = self._pending_tools_message
+                self._pending_tools_message = None
+                self.perform_pick_task(tools_message)
+                self.get_logger().info('/pick_task_tools 대기로 복귀...')
+
+    def perform_pick_task(self, tools_message: str):
+        self.get_logger().info('홈 자세로 이동 중...')
+        self.move_to_joints([math.radians(d) for d in HOME_JOINTS_DEG])
+
+        # "hammer:user screwdriver:user" 형식 파싱. 빈 메시지면 기본형(도구 필요 없음)이거나
+        # 아무것도 확정 안 된 것 - 둘 다 집을 도구가 없다는 뜻이라 그대로 종료.
+        pairs = []
+        for token in tools_message.split():
+            if ':' not in token:
+                continue
+            tool_name, target = token.split(':', 1)
+            pairs.append((tool_name, target))
+
+        if not pairs:
+            self.get_logger().info('가져올 도구 없음 (기본형 등). 작업을 종료합니다.')
+            return
+
+        for tool_name, target in pairs:
+            class_name = VOICE_TOOL_TO_CLASS.get(tool_name)
+            if class_name is None:
+                self.get_logger().error(f'알 수 없는 도구 이름: {tool_name} - 건너뜀')
+                continue
+
+            self.get_logger().info(f'[{tool_name} -> {target}] 스캔 위치로 이동 중...')
+            self.move_to_joints([math.radians(d) for d in TOOL_SCAN_JOINTS_DEG])
+
+            self.get_logger().info(f'{class_name} 탐지 대기중...')
+            detection = self.detect_once(target_class=class_name)
+            if detection is None:
+                self.get_logger().error(f'{tool_name}({class_name}) 탐지 실패 (타임아웃) - 건너뜀')
+                continue
+
+            delivery_joints_deg = TOOL_DELIVERY_JOINTS_DEG.get(class_name, TOOL_SCAN_JOINTS_DEG)
+            if not self.pick_detected_tool(detection, delivery_joints_deg):
+                self.get_logger().error(f'{tool_name} pick/배송 실패 - 다음 도구로 진행')
+                continue
+
+            # [HRI 비전 손 감지 + HMI/음성 확인 연동]: 배송 위치에서 정지 대기 상태로
+            # 손 근접/HMI 확인/음성 확인 중 먼저 오는 것으로 그리퍼를 열어 전달함
+            released = self.wait_for_release(tool_name, target)
+            if released:
+                self.get_logger().info(f'{tool_name} 전달 완료.')
+            else:
+                self.get_logger().info(f'{tool_name} 릴리즈 대기 종료 (제한시간 초과).')
+
+            self.clear_hand_obstacle()
+
+        self.get_logger().info('모든 도구 배송 완료. 홈으로 복귀합니다.')
+        self.move_to_joints([math.radians(d) for d in HOME_JOINTS_DEG])
 
 
 def main():

@@ -57,6 +57,21 @@ class InspectionResult(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
+class VoiceConfirmRequest(Base):
+    """음성/HMI 확인 요청 기록. voice_processing의 confirm_tools(픽업 전 "이 도구
+    맞아?")와 tool_pick_yolo_target.py의 confirm_release(배송 후 "받으셨나요?")가
+    둘 다 이 테이블에 pending row를 남기고, HMI는 여기서 폴링으로 읽어간다."""
+    __tablename__ = "voice_confirm_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)  # "tool_confirm" | "release_confirm"
+    tools: Mapped[str] = mapped_column(String(255), nullable=False, default="[]")  # JSON 인코딩된 리스트
+    targets: Mapped[str] = mapped_column(String(255), nullable=False, default="[]")  # JSON 인코딩된 리스트
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")  # pending|confirmed|rejected
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class User(Base):
     __tablename__ = "users"
 

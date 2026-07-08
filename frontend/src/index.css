@@ -21,6 +21,22 @@
   -webkit-font-smoothing: antialiased;
 }
 
+:root[data-theme='dark'] {
+  --surface-1: #24262b;
+  --page-plane: #1b1d21;
+  --text-primary: #ececeb;
+  --text-secondary: #a8a7a2;
+  --text-muted: #7a7974;
+  --gridline: #34363b;
+  --border: rgba(255, 255, 255, 0.1);
+  --accent: #4c93e8;
+
+  --status-good: #2fbf2f;
+  --status-warning: #fbc02d;
+  --status-serious: #f2946a;
+  --status-critical: #e35b5b;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -34,4 +50,14 @@ h2,
 h3 {
   font-weight: 600;
   margin: 0;
+}
+
+button {
+  color: inherit;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-muted);
+  opacity: 1;
 }

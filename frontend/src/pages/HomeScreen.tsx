@@ -3,8 +3,9 @@ import * as resourcesApi from '../api/resources'
 import * as qcApi from '../api/qc'
 import type { Summary } from '../types/resource'
 import type { QcSummary } from '../types/qc'
+import { VoiceStartButton } from '../components/VoiceStartButton'
 
-type Screen = 'inventory' | 'qc' | 'robot' | 'users'
+type Screen = 'inventory' | 'qc' | 'robot' | 'work' | 'users'
 
 export function HomeScreen({
   canManage,
@@ -26,6 +27,9 @@ export function HomeScreen({
       <div className="launcher-head">
         <h1>무엇을 하시겠어요?</h1>
         <p>모듈을 선택하면 화면이 전환됩니다.</p>
+        <div style={{ marginTop: 16 }}>
+          <VoiceStartButton />
+        </div>
       </div>
 
       <div className="tile-grid">
@@ -61,6 +65,15 @@ export function HomeScreen({
           <p className="tile-desc">연결 · 제어 · 안전관리</p>
           <div className="tile-stat">미연결</div>
           <div className="tile-note">현재 작업: 대기</div>
+        </button>
+
+        <button type="button" className="tile" onClick={() => onNavigate('work')}>
+          <div className="tile-icon" style={{ background: 'var(--status-warning)' }}>
+            작업
+          </div>
+          <h3>작업 화면</h3>
+          <p className="tile-desc">현재 작업 현황 및 제어</p>
+          <div className="tile-stat">대기 중</div>
         </button>
 
         {canManage && (
