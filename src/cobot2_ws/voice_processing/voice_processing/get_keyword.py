@@ -51,6 +51,16 @@ PRODUCT_TOOL_MAP = {
 YES_WORDS = ["응", "맞아", "네", "그래", "오케이", "맞습니다", "그거 맞아", "yes", "ok"]
 NO_WORDS = ["아니", "아니야", "틀렸어", "다시", "그거 아니야", "잘못됐어", "no", "cancel"]
 
+# 도구 배송과 분리해서 바로 젠가 품질 검사를 시작하는 음성 명령
+INSPECTION_COMMANDS = [
+    "품질검사",
+    "품질 검사",
+    "젠가검사",
+    "젠가 검사",
+    "불량검사",
+    "불량 검사",
+]
+
 ############ AI Processor ############
 # class AIProcessor:
 #     def __init__(self):
@@ -153,6 +163,9 @@ class GetKeyword(Node):
         self.get_keyword_srv = self.create_service(
             Trigger, "get_keyword", self.get_keyword
         )
+        self.jenga_inspection_client = self.create_client(
+            Trigger, "/run_jenga_inspection"
+        )
         # 음성으로 "네/아니오"를 확인하는 것도 다른 노드(tool_pick_yolo_target.py의
         # 배송 완료 확인)에서 재사용할 수 있도록 서비스로 노출
         self.listen_confirmation_srv = self.create_service(
@@ -213,6 +226,37 @@ class GetKeyword(Node):
         response.confirmed = confirmed
         return response
 
+    def _is_inspection_command(self, text):
+        if not text:
+            return False
+        normalized = text.replace("해 줘", "해줘").replace("해주세요", "해줘")
+        return any(keyword in normalized for keyword in INSPECTION_COMMANDS)
+
+    def _on_jenga_inspection_done(self, future):
+        try:
+            result = future.result()
+        except Exception as exc:
+            self.get_logger().error(f"젠가 품질 검사 서비스 호출 실패: {exc}")
+            return
+
+        if result.success:
+            self.get_logger().info(f"젠가 품질 검사 완료: {result.message}")
+        else:
+            self.get_logger().error(f"젠가 품질 검사 실패: {result.message}")
+
+    def _trigger_jenga_inspection(self):
+        if not self.jenga_inspection_client.service_is_ready():
+            self.get_logger().error(
+                "'/run_jenga_inspection' 서비스가 준비되지 않았습니다. "
+                "robot_control jenga_inspector 실행 상태를 확인하세요."
+            )
+            return False
+
+        future = self.jenga_inspection_client.call_async(Trigger.Request())
+        future.add_done_callback(self._on_jenga_inspection_done)
+        self.get_logger().info("음성 명령으로 젠가 품질 검사를 시작했습니다.")
+        return True
+
     def get_keyword(self, request, response):  # 요청과 응답 객체를 받아야 함    # d2 이 함수 일부 수정함
         self.play_audio("sys_wait.mp3")
         try:
@@ -230,6 +274,12 @@ class GetKeyword(Node):
 
         # STT --> Keword Extract --> Embedding
         output_message = self.stt.speech2text()
+
+        if self._is_inspection_command(output_message):
+            response.success = self._trigger_jenga_inspection()
+            response.message = ""
+            return response
+
         tools, targets, matched_product = self.extract_keyword(output_message)
 
         if not tools:
