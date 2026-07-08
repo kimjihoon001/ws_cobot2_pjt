@@ -88,8 +88,8 @@ USE_GRIPPER = True
 # 사용자가 공구를 잡아당기는 힘(외력) 감지 임계값 (Nm, 관절 토크 변동 기준)
 # 4.0 Nm은 실기 충돌 한계와 겹쳐 로봇이 비상 정지할 가능성이 큼 -> 1.8 Nm로 감지 한계 대폭 완화
 FORCE_DETECTION_THRESHOLD = 1.8
-# 공구 파지 후 외력 감지 모니터링 대기 시간 (초)
-FORCE_MONITORING_TIMEOUT = 10.0
+# 공구 파지 후 외력 감지 모니터링 대기 시간 (초) - 충분히 긴 시간으로 연장
+FORCE_MONITORING_TIMEOUT = 60.0
 
 # top-down(그리퍼가 아래를 보는) 자세 — YAW는 keypoint 축으로 매 탐지마다 계산해서 대체함
 GRASP_ROLL, GRASP_PITCH = math.pi, 0.0
@@ -279,6 +279,10 @@ class PickYoloTarget(Node):
         self.create_subscription(Image, '/camera/camera/aligned_depth_to_color/image_raw', self._depth_cb, 10)
         self.create_subscription(CameraInfo, '/camera/camera/color/camera_info', self._camera_info_cb, 10)
         self.create_subscription(JointState, '/joint_states', self._joint_state_cb, 10)
+        
+        # [HRI 비전 기반 손 감지]: hand_obstacle_publisher가 발행하는 손의 3D 좌표 구독
+        self.current_hand_pos = None
+        self.create_subscription(Point, '/hand_position', self._hand_position_cb, 10)
 
         # YOLO 탐지 시각화 이미지 퍼블리셔 (rqt_image_view로 확인)
         self._vis_pub = self.create_publisher(Image, '/yolo_detection/image', 1)
@@ -344,6 +348,18 @@ class PickYoloTarget(Node):
         self.current_joint_state = msg
         if 'joint_6' in msg.name:
             self.current_joint6 = msg.position[msg.name.index('joint_6')]
+
+    def _hand_position_cb(self, msg):
+        """hand_obstacle_publisher가 발행하는 base_link 기준 손 위치(m) 수신 및 장애물 씬 직접 갱신 (전체 범위 수용)"""
+        is_clear_signal = msg.z < -1.0
+            
+        if is_clear_signal:
+            if self.current_hand_pos is not None:
+                self.current_hand_pos = None
+                self.clear_hand_obstacle()
+        else:
+            self.current_hand_pos = [msg.x, msg.y, msg.z]
+            self.update_hand_obstacle(msg.x, msg.y, msg.z)
 
     def _sample_depth(self, cx_px, cy_px):
         h, w = self.depth_frame.shape[:2]
@@ -490,6 +506,53 @@ class PickYoloTarget(Node):
         qx, qy, qz, qw = quat_from_rpy(GRASP_ROLL, GRASP_PITCH, yaw)
         pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w = qx, qy, qz, qw
         return pose
+
+    def get_current_tcp_pose_tf(self):
+        """base_link 대비 rg2_tcp(EEF_LINK)의 실시간 [x, y, z] 좌표를 미터 단위로 획득"""
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                PLANNING_FRAME, EEF_LINK, rclpy.time.Time(),
+                timeout=Duration(seconds=1.0)
+            )
+            return [
+                transform.transform.translation.x,
+                transform.transform.translation.y,
+                transform.transform.translation.z
+            ]
+        except Exception as e:
+            self.get_logger().error(f"TCP TF 조회 실패: {e}")
+            return None
+
+    def update_hand_obstacle(self, x, y, z):
+        """MoveIt planning scene에 손 장애물(human_hand) 스폰/갱신. 젠가 코드와 동일한 2.5cm 반지름(지름 5cm) 공"""
+        obj = CollisionObject()
+        obj.header.frame_id = PLANNING_FRAME
+        obj.id = 'human_hand'
+
+        sphere = SolidPrimitive()
+        sphere.type = SolidPrimitive.SPHERE
+        sphere.dimensions = [0.025] # 2.5cm safety sphere radius (5cm diameter)
+
+        pose = Pose()
+        pose.position.x = x
+        pose.position.y = y
+        pose.position.z = z
+        pose.orientation.w = 1.0
+
+        obj.primitives = [sphere]
+        obj.primitive_poses = [pose]
+        obj.operation = CollisionObject.ADD
+
+        # MoveIt PlanningScene Diff 발행 (collision_pub 사용)
+        self._collision_pub.publish(obj)
+
+    def clear_hand_obstacle(self):
+        """MoveIt planning scene에서 손 장애물 제거"""
+        obj = CollisionObject()
+        obj.header.frame_id = PLANNING_FRAME
+        obj.id = 'human_hand'
+        obj.operation = CollisionObject.REMOVE
+        self._collision_pub.publish(obj)
 
     def axis_yaw(self, head_px, tail_px):
         """head<->tail keypoint 축을 base_link 수평면 각도로 변환.
@@ -690,22 +753,29 @@ class PickYoloTarget(Node):
         goal_msg.request = req
         goal_msg.planning_options = opts
 
-        self.get_logger().info(f'관절 공간 이동: {[f"{math.degrees(p):.1f}" for p in joint_positions]} deg')
-        send_future = self._move_ac.send_goal_async(goal_msg)
-        rclpy.spin_until_future_complete(self, send_future)
-        goal_handle = send_future.result()
-        if not goal_handle.accepted:
-            self.get_logger().error('목표가 move_group에서 거부됨')
-            return False
+        while rclpy.ok():
+            self.get_logger().info(f'관절 공간 이동: {[f"{math.degrees(p):.1f}" for p in joint_positions]} deg')
+            send_future = self._move_ac.send_goal_async(goal_msg)
+            rclpy.spin_until_future_complete(self, send_future)
+            goal_handle = send_future.result()
+            if not goal_handle.accepted:
+                self.get_logger().error('목표가 move_group에서 거부됨. 손에 막혔을 가능성이 높습니다. 2.0초 뒤 재시도...')
+                time.sleep(2.0)
+                continue
 
-        result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self, result_future)
-        result = result_future.result().result
+            result_future = goal_handle.get_result_async()
+            rclpy.spin_until_future_complete(self, result_future)
+            result = result_future.result().result
 
-        if result.error_code.val == 1:
-            self.get_logger().info('관절 공간 이동 완료')
-            return True
-        self.get_logger().error(f'실패: error_code={result.error_code.val}')
+            if result.error_code.val == 1:
+                self.get_logger().info('관절 공간 이동 완료')
+                return True
+            else:
+                self.get_logger().error(
+                    f'이동 실패 (error_code={result.error_code.val}). 경로가 손에 의해 막혔을 수 있습니다. 2.0초 뒤 재시도...'
+                )
+                time.sleep(2.0)
+
         return False
 
     def move_cartesian(self, target_pose: Pose, speed_scale=SPEED_SCALE):
@@ -854,113 +924,63 @@ class PickYoloTarget(Node):
             time.sleep(0.1)
         self.get_logger().info(f"물체 '{obj_id}' 그리퍼에 부착 완료")
 
-    def monitor_user_pull_and_release(self) -> bool:
-        """pregrasp 대기 중인 상태에서 joint_3 ~ joint_6 토크(effort) 혹은 위치(position) 변동을 관측해
-        사용자가 공구를 당기는 힘이 감지되면 그리퍼를 열고 완료 상태를 반환."""
+    def monitor_hand_proximity_and_release(self) -> bool:
+        """pregrasp 대기 상태에서 hand_obstacle_publisher가 발행하는 3D 손 위치 좌표와
+        그리퍼 팁(rg2_tcp)의 실시간 거리를 비교하여 15cm 이내로 좁혀지면 그리퍼를 엽니다."""
+        # 15cm 이내 접근 시 전달 트리거
+        HAND_PROXIMITY_THRESHOLD = 0.15
+
         self.get_logger().info(
-            f"사용자 외력 대기 시작 (임계값: {FORCE_DETECTION_THRESHOLD} Nm / 위치변위 임계값: 0.015 rad, 제한시간: {FORCE_MONITORING_TIMEOUT}초)..."
+            f"사용자 손 접근 대기 시작 (거리 임계치: {HAND_PROXIMITY_THRESHOLD} m, 제한시간: {FORCE_MONITORING_TIMEOUT}초)..."
         )
         start_time = self.get_clock().now()
-        initial_efforts = {}
-        initial_positions = {}
-        target_joints = ['joint_3', 'joint_4', 'joint_5', 'joint_6']
-        use_position_fallback = False
 
-        # 안정적인 시작 평균값 확보용 대기
+        # 안정적인 토픽 수신을 위한 대기
         time.sleep(1.0)
         
         # ROS 2 토픽 최신 갱신을 위해 spin_once 강제
         for _ in range(5):
             rclpy.spin_once(self, timeout_sec=0.05)
-        
+
         while rclpy.ok():
             current_time = self.get_clock().now()
             duration = (current_time - start_time).nanoseconds / 1e9
             if duration > FORCE_MONITORING_TIMEOUT:
-                self.get_logger().info("사용자 외력 감지 대기 제한시간 초과. 정상 종료합니다.")
+                self.get_logger().info("사용자 손 접근 대기 제한시간 초과. 프로세스를 정상 종료합니다.")
                 return False
 
-            if self.current_joint_state is None:
-                rclpy.spin_once(self, timeout_sec=0.1)
-                continue
-
-            try:
-                # 타겟 관절들의 실시간 effort 및 position 값 수집
-                current_efforts = {}
-                current_positions = {}
-                for name in target_joints:
-                    idx = self.current_joint_state.name.index(name)
-                    current_efforts[name] = self.current_joint_state.effort[idx]
-                    current_positions[name] = self.current_joint_state.position[idx]
-            except (ValueError, IndexError) as e:
-                rclpy.spin_once(self, timeout_sec=0.1)
-                continue
-
-            # effort 데이터가 nan인지 판별
-            has_nan = any(math.isnan(val) for val in current_efforts.values())
-            if has_nan and not use_position_fallback:
-                use_position_fallback = True
-                self.get_logger().warn("⚠️ effort(토크) 피드백이 NaN으로 검출되어 '위치 편차(Position Fallback)' 감지 모드로 전환합니다.")
-
-            if use_position_fallback:
-                # 위치 기반 감지 루프
-                if not initial_positions:
-                    initial_positions = current_positions
-                    init_msg = ", ".join([f"{k}: {v:.3f}rad" for k, v in initial_positions.items()])
-                    self.get_logger().info(f"초기 위치 기준값 설정 완료 -> {init_msg}")
-                    time.sleep(0.1)
-                    continue
-
-                diffs = {name: abs(current_positions[name] - initial_positions[name]) for name in target_joints}
-                debug_msg = " | ".join([f"{name[6:]}: dp={diffs[name]:.4f}rad" for name in target_joints])
-                self.get_logger().info(f"위치 실시간 변동 [ {debug_msg} ]")
-
-                triggered = False
-                triggered_joint = ""
-                # 약 0.015 rad (약 0.85도) 이상의 미세 움직임 발생 시 당긴 것으로 판단
-                POSITION_THRESHOLD = 0.015
-                for name in target_joints:
-                    if diffs[name] > POSITION_THRESHOLD:
-                        triggered = True
-                        triggered_joint = name
-                        break
-
-                if triggered:
-                    self.get_logger().info(
-                        f"⚠️ 외력 감지(위치 편차)! {triggered_joint} 관절에서 임계치 초과 (변위량: {diffs[triggered_joint]:.4f}rad) -> 그리퍼를 엽니다!"
-                    )
-                    self.gripper_command('o')
-                    return True
-            else:
-                # 토크(effort) 기반 감지 루프
-                if not initial_efforts:
-                    initial_efforts = current_efforts
-                    init_msg = ", ".join([f"{k}: {v:.2f}Nm" for k, v in initial_efforts.items()])
-                    self.get_logger().info(f"초기 토크 기준값 설정 완료 -> {init_msg}")
-                    time.sleep(0.1)
-                    continue
-
-                diffs = {name: abs(current_efforts[name] - initial_efforts[name]) for name in target_joints}
-                debug_msg = " | ".join([f"{name[6:]}: d={diffs[name]:.2f}Nm" for name in target_joints])
-                self.get_logger().info(f"토크 실시간 변동 [ {debug_msg} ]")
-
-                triggered = False
-                triggered_joint = ""
-                for name in target_joints:
-                    if diffs[name] > FORCE_DETECTION_THRESHOLD:
-                        triggered = True
-                        triggered_joint = name
-                        break
-
-                if triggered:
-                    self.get_logger().info(
-                        f"⚠️ 외력 감지! {triggered_joint} 관절에서 임계치 초과 (변동량: {diffs[triggered_joint]:.2f}Nm) -> 그리퍼를 엽니다!"
-                    )
-                    self.gripper_command('o')
-                    return True
-
-            # spin_once를 반드시 갱신해주어야 joint_states 토픽 콜백이 실시간으로 돎
+            # spin_once를 실행하여 손 위치 토픽 콜백 구동
             rclpy.spin_once(self, timeout_sec=0.01)
+
+            if self.current_hand_pos is None:
+                self.get_logger().info("손 위치 데이터(/hand_position) 수신 대기 중...", once=True)
+                time.sleep(0.1)
+                continue
+
+            # 실시간 TCP 위치 획득
+            tcp_xyz = self.get_current_tcp_pose_tf()
+            if tcp_xyz is None:
+                self.get_logger().warn("실시간 TCP TF 획득 실패. 재시도합니다.")
+                time.sleep(0.1)
+                continue
+
+            # 직선 거리(유클리드 거리) 계산
+            dx = self.current_hand_pos[0] - tcp_xyz[0]
+            dy = self.current_hand_pos[1] - tcp_xyz[1]
+            dz = self.current_hand_pos[2] - tcp_xyz[2]
+            dist = np.sqrt(dx**2 + dy**2 + dz**2)
+
+            self.get_logger().info(
+                f"작업자 손과의 거리: {dist:.3f} m (손: x={self.current_hand_pos[0]:.2f}, y={self.current_hand_pos[1]:.2f}, z={self.current_hand_pos[2]:.2f} / TCP: x={tcp_xyz[0]:.2f}, y={tcp_xyz[1]:.2f}, z={tcp_xyz[2]:.2f})"
+            )
+
+            if dist < HAND_PROXIMITY_THRESHOLD:
+                self.get_logger().info(
+                    f"⚠️ 작업자 손 근접 감지! (거리: {dist:.3f} m <= {HAND_PROXIMITY_THRESHOLD} m) 그리퍼를 열어 공구를 안전하게 전달합니다!"
+                )
+                self.gripper_command('o')
+                return True
+
             time.sleep(0.1)
 
         return False
@@ -1043,19 +1063,23 @@ class PickYoloTarget(Node):
 
         if not self.gripper_command('c'):
             return
+
         # 그리퍼를 닫은 후, 월드(base_link)에 있던 장애물을 그리퍼 프레임으로 리어태치
         self.attach_object_to_gripper(obj_id, mesh_msg, gripper_position, gripper_quat)
         time.sleep(0.5)
         self.move_to_joints(pregrasp_joints)
         self.get_logger().info('pick 완료')
 
-        # [HRI 추가 기능]: 공구를 들어 올린 후 정지 대기 상태에서 
-        # 사용자가 공구를 잡아당기는 순간(외력 감지) 스스로 놓도록 감시 루프 실행
-        released = self.monitor_user_pull_and_release()
+        # [HRI 비전 손 감지 연동]: 공구를 들어 올린 후 정지 대기 상태에서 
+        # 사용자의 손이 15cm 이내로 가까워지면 자동으로 그리퍼를 열어 전달함
+        released = self.monitor_hand_proximity_and_release()
         if released:
-            self.get_logger().info('사용자 외력 요구로 인해 안전하게 공구를 전달하고 작업을 종료합니다.')
+            self.get_logger().info('사용자 손 접근 확인으로 인해 안전하게 공구를 전달하고 작업을 종료합니다.')
         else:
-            self.get_logger().info('외력 감지 대기 종료. 정상 프로세스를 종료합니다.')
+            self.get_logger().info('손 감지 대기 종료. 정상 프로세스를 종료합니다.')
+        
+        # 동작 종료 후 씬 잔해 청소
+        self.clear_hand_obstacle()
 
 
 def main():
