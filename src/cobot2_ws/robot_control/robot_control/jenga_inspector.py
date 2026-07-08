@@ -235,7 +235,7 @@ class JengaInspectorNode(Node):
         
         frame_results = []
         img_copy = self.latest_image.copy()
-        results = self.model(img_copy, conf=0.20, verbose=False)
+        results = self.model(img_copy, conf=0.60, verbose=False)
         
         if len(results) > 0:
             res = results[0]

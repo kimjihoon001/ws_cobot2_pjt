@@ -57,6 +57,9 @@ EEF_LINK = 'rg2_tcp'
 # fixed joint로 URDF에 반영되어 있어, MoveIt이 그리퍼 손끝을 직접 목표로 잡는다.
 SPEED_SCALE = 0.2              # 낮을수록 천천히 (0.1은 너무 느리다는 실기 피드백으로 상향, 필요시 재조정)
 PREGRASP_Z_OFFSET = 0.15       # 물체 위 접근 높이 (m)
+REFINE_SETTLE_SEC = 0.8        # 상공 이동 후 카메라/로봇 진동 안정화 시간
+REFINE_SAMPLE_COUNT = 5        # 상공에서 새로 취득할 검출 프레임 수
+REFINE_MIN_VALID_SAMPLES = 3   # 이 개수 미만이면 최초 원거리 좌표로 폴백
 # 감지 z는 원통형 손잡이의 맨 윗면(카메라에 보이는 지점)이라 아래(중심축 쪽)로
 # 내려가서 잡음. 위로 주면 손잡이 중심보다 한참 높은 허공에서 손가락이 닫혀 놓침.
 # 도구마다 손잡이 두께/무게중심이 달라 최적값이 다름 - 도구별로 따로 관리.
@@ -64,8 +67,8 @@ PREGRASP_Z_OFFSET = 0.15       # 물체 위 접근 높이 (m)
 # 원인이 "너무 얕게(높이) 내려가서"였음 -> -0.002(더 얕게)가 아니라 반대로 더 깊게
 # 내려가야 함 — 실측 미세조정 필요한 값.
 GRASP_Z_CLEARANCE_BY_CLASS = {
-    'tool-hammer': -0.005,
-    'screw2': -0.010,
+    'tool-hammer': -0.0058,
+    'screw2': -0.0073,
 }
 CARTESIAN_MAX_STEP = 0.01      # pregrasp -> grasp 하강 Cartesian Path 보간 간격 (m)
 
@@ -521,6 +524,68 @@ class PickYoloTarget(Node):
             return cx_px, cy_px, depth_m, head_px, tail_px, class_name
 
         return None
+
+    @staticmethod
+    def _circular_mean(angles):
+        """-pi/pi 경계를 넘는 각도도 평균이 뒤집히지 않도록 원형 평균을 계산."""
+        return math.atan2(
+            float(np.mean(np.sin(angles))),
+            float(np.mean(np.cos(angles))),
+        )
+
+    def refine_detection_above_tool(self, target_class):
+        """물체 상공에서 새 color/depth 프레임을 여러 번 취득해 base 좌표를 보정한다.
+
+        각 샘플마다 기존 프레임을 비워 이동 전 프레임 재사용을 막고, XYZ는 중앙값,
+        도구 축/yaw는 원형 평균을 사용한다. 검출 수가 부족하면 None을 반환해 최초
+        스캔 좌표로 폴백하게 한다.
+        """
+        self.get_logger().info(
+            f'상공 재검출 시작: {target_class}, {REFINE_SAMPLE_COUNT}프레임'
+        )
+        time.sleep(REFINE_SETTLE_SEC)
+        samples = []
+
+        for sample_idx in range(REFINE_SAMPLE_COUNT):
+            # 이동 전에 수신한 프레임으로 재검출하지 않도록 새 프레임을 강제한다.
+            self.color_frame = None
+            self.depth_frame = None
+            detection = self.detect_once(target_class=target_class, timeout_sec=3.0)
+            if detection is None:
+                self.get_logger().warn(
+                    f'상공 재검출 샘플 실패 ({sample_idx + 1}/{REFINE_SAMPLE_COUNT})'
+                )
+                continue
+
+            cx, cy, depth_m, head_px, tail_px, detected_class = detection
+            try:
+                x, y, z = self.pixel_to_base_xyz(cx, cy, depth_m)
+                axis_angle, yaw = self.axis_yaw(head_px, tail_px)
+            except Exception as exc:
+                self.get_logger().warn(f'상공 좌표 변환 실패: {exc}')
+                continue
+
+            samples.append((x, y, z, axis_angle, yaw))
+            self.get_logger().info(
+                f'상공 샘플 {len(samples)}: x={x:.4f}, y={y:.4f}, z={z:.4f}'
+            )
+
+        if len(samples) < REFINE_MIN_VALID_SAMPLES:
+            self.get_logger().warn(
+                f'상공 재검출 유효 샘플 부족({len(samples)}/'
+                f'{REFINE_MIN_VALID_SAMPLES}) - 최초 좌표 사용'
+            )
+            return None
+
+        values = np.asarray(samples, dtype=np.float64)
+        x, y, z = np.median(values[:, :3], axis=0)
+        axis_angle = self._circular_mean(values[:, 3])
+        yaw = self._circular_mean(values[:, 4])
+        self.get_logger().info(
+            f'상공 재검출 보정 완료: x={x:.4f}, y={y:.4f}, z={z:.4f}, '
+            f'유효 샘플={len(samples)}'
+        )
+        return float(x), float(y), float(z), axis_angle, yaw
 
     def pixel_to_base_xyz(self, cx_px, cy_px, depth_m):
         fx, fy = self.intrinsics['fx'], self.intrinsics['fy']
@@ -979,7 +1044,7 @@ class PickYoloTarget(Node):
 
     def detach_object_from_gripper(self, obj_id):
         """사람에게 건네준(그리퍼 오픈) 후 그리퍼에 붙어있던 도구 장애물을 완전히 제거.
-        REMOVE 연산이라 world 장애물로도 안 남고 씬에서 그냥 사라진다."""
+        attached/world 양쪽에 REMOVE를 발행해 Planning Scene에서 완전히 없앤다."""
         from moveit_msgs.msg import AttachedCollisionObject, CollisionObject
 
         aco = AttachedCollisionObject()
@@ -987,10 +1052,18 @@ class PickYoloTarget(Node):
         aco.object.id = obj_id
         aco.object.operation = CollisionObject.REMOVE
 
+        world_obj = CollisionObject()
+        world_obj.header.frame_id = PLANNING_FRAME
+        world_obj.id = obj_id
+        world_obj.operation = CollisionObject.REMOVE
+
         for _ in range(5):
             self._attached_collision_pub.publish(aco)
+            self._collision_pub.publish(world_obj)
             time.sleep(0.1)
-        self.get_logger().info(f"물체 '{obj_id}' 그리퍼에서 분리(장애물 제거) 완료")
+        self.get_logger().info(
+            f"물체 '{obj_id}' attached/world 장애물 제거 완료"
+        )
 
     def wait_for_release(self, tool_name, target) -> bool:
         """배송 위치 도착 후 그리퍼를 열 신호를 기다린다. 셋 중 아무거나 먼저 오면 릴리즈:
@@ -1090,23 +1163,28 @@ class PickYoloTarget(Node):
             stl_path = '/home/rokey/ws_cobot2_pjt/src/cobot2_ws/m0609_rg2_bringup/meshes/hammer.stl'
             mesh_scale = 1.0
             obj_id = 'hammer'
-            world_position, world_quat, gripper_position, gripper_quat = compute_attach_pose(
+            attach_pose_params = dict(
                 flatten_roll=math.pi / 2, flatten_pitch=0.0, world_yaw_offset=math.pi / 2,
-                native_offset=(0.0, 0.0, 0.0), axis_angle=axis_angle, yaw=yaw,
-                detected_xyz=(x, y, z))
+                native_offset=(0.0, 0.0, 0.0))
         elif detected_class == 'screw2':
             stl_path = '/home/rokey/ws_cobot2_pjt/src/cobot2_ws/m0609_rg2_bringup/meshes/screwdriver.stl'
             mesh_scale = 0.001
             obj_id = 'screwdriver'
             # 실기 확인 결과 팁/버트 방향이 반대로 나와서 180도 추가 — 원형 단면이라
             # 요(Z축)만 더 돌리면 되고 다른 계산(오프셋 등)엔 영향 없음.
-            world_position, world_quat, gripper_position, gripper_quat = compute_attach_pose(
+            attach_pose_params = dict(
                 flatten_roll=0.0, flatten_pitch=0.0, world_yaw_offset=math.pi / 2,
-                native_offset=(0.0, -0.08, 0.0), axis_angle=axis_angle, yaw=yaw,
-                detected_xyz=(x, y, z))
+                native_offset=(0.0, -0.08, 0.0))
         else:
             self.get_logger().error(f'미지원 detected_class: {detected_class}')
             return False
+
+        world_position, world_quat, gripper_position, gripper_quat = compute_attach_pose(
+            **attach_pose_params,
+            axis_angle=axis_angle,
+            yaw=yaw,
+            detected_xyz=(x, y, z),
+        )
 
         mesh_msg = None
         try:
@@ -1126,6 +1204,43 @@ class PickYoloTarget(Node):
             return False
         if not self.move_to_joints(pregrasp_joints):
             return False
+
+        # 원거리 스캔 좌표는 거리/시야각/hand-eye 오차가 크게 반영될 수 있다.
+        # 물체 상공에서 새 프레임을 여러 번 측정한 뒤 최종 파지 좌표를 다시 계산한다.
+        refined = self.refine_detection_above_tool(detected_class)
+        if refined is not None:
+            refined_x, refined_y, refined_z, refined_axis_angle, refined_yaw = refined
+            refined_world_position, refined_world_quat, refined_gripper_position, refined_gripper_quat = compute_attach_pose(
+                **attach_pose_params,
+                axis_angle=refined_axis_angle,
+                yaw=refined_yaw,
+                detected_xyz=(refined_x, refined_y, refined_z),
+            )
+
+            refined_pregrasp_joints = self.solve_ik(
+                refined_x, refined_y, refined_z + PREGRASP_Z_OFFSET, refined_yaw,
+                seed_joints=pregrasp_joints,
+            )
+            if refined_pregrasp_joints is None:
+                self.get_logger().warn(
+                    '보정된 pregrasp IK 실패 - 최초 상공 자세와 좌표 사용'
+                )
+            elif self.move_to_joints(refined_pregrasp_joints):
+                x, y, z = refined_x, refined_y, refined_z
+                axis_angle, yaw = refined_axis_angle, refined_yaw
+                world_position, world_quat = refined_world_position, refined_world_quat
+                gripper_position, gripper_quat = refined_gripper_position, refined_gripper_quat
+                pregrasp_joints = refined_pregrasp_joints
+
+                # 동일 ID를 갱신해 Planning Scene의 도구 메쉬도 보정 좌표와 일치시킨다.
+                if mesh_msg is not None:
+                    self.spawn_attached_object(
+                        obj_id, mesh_msg, world_position, world_quat
+                    )
+            else:
+                self.get_logger().warn(
+                    '보정된 pregrasp 이동 실패 - 최초 상공 자세와 좌표 사용'
+                )
 
         # 최종 하강: move_cartesian_grasp()가 순수 수직 Cartesian 직선 하강을 우선
         # 시도하고, 특이점 때문에 안 되면 자세는 그대로(수직) 유지한 채 관절공간
