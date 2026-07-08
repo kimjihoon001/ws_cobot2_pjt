@@ -55,12 +55,17 @@ EEF_LINK = 'rg2_tcp'
 # ※ manipulator 그룹 tip_link = rg2_tcp (m0609_rg2.srdf). TCP 오프셋(tool0 기준
 # 회전 없이 Z 231.066mm, 2026-07-07 두산 티칭펜던트 실측)은 onrobot_rg2_model_macro.xacro의
 # fixed joint로 URDF에 반영되어 있어, MoveIt이 그리퍼 손끝을 직접 목표로 잡는다.
-SPEED_SCALE = 0.1              # 낮을수록 천천히 (가상모드라도 우선 저속 유지)
+SPEED_SCALE = 0.2              # 낮을수록 천천히 (0.1은 너무 느리다는 실기 피드백으로 상향, 필요시 재조정)
 PREGRASP_Z_OFFSET = 0.15       # 물체 위 접근 높이 (m)
-GRASP_Z_CLEARANCE = -0.005     # 감지 z는 원통형 손잡이의 맨 윗면(카메라에 보이는 지점)이라
-                                # 아래(중심축 쪽)로 내려가서 잡음. 위로 주면 손잡이 중심보다
-                                # 한참 높은 허공에서 손가락이 닫혀 놓침. -0.015는 실기에서
-                                # 바닥과 충돌할 만큼 과했음 — 실측 미세조정 필요한 값.
+# 감지 z는 원통형 손잡이의 맨 윗면(카메라에 보이는 지점)이라 아래(중심축 쪽)로
+# 내려가서 잡음. 위로 주면 손잡이 중심보다 한참 높은 허공에서 손가락이 닫혀 놓침.
+# 도구마다 손잡이 두께/무게중심이 달라 최적값이 다름 - 도구별로 따로 관리.
+# -0.015는 해머 기준 바닥 충돌할 만큼 과했음. 스크류드라이버는 -0.005에서 파지 실패해서
+# 살짝 위(덜 하강)로 조정 — 실측 미세조정 필요한 값.
+GRASP_Z_CLEARANCE_BY_CLASS = {
+    'tool-hammer': -0.005,
+    'screw2': -0.002,
+}
 CARTESIAN_MAX_STEP = 0.01      # pregrasp -> grasp 하강 Cartesian Path 보간 간격 (m)
 
 # 특이점/조인트 리밋 회피용 미세 틸트 후보 (Roll, Pitch 오프셋, 라디안). solve_ik의
@@ -302,6 +307,9 @@ class PickYoloTarget(Node):
         # [HRI 비전 기반 손 감지]: hand_obstacle_publisher가 발행하는 손의 3D 좌표 구독
         self.current_hand_pos = None
         self.create_subscription(Point, '/hand_position', self._hand_position_cb, 10)
+
+        # 현재 그리퍼에 부착된 도구 장애물 id (릴리즈 후 detach_object_from_gripper로 제거)
+        self._attached_obj_id = None
 
         # /get_keyword 호출은 이제 백엔드(ros_bridge.py, HMI '음성 시작' 버튼)가 클라이언트로
         # 담당하고, 응답이 오면 이 토픽으로 "tool:target tool2:target2" 형식 메시지를 발행한다.
@@ -968,6 +976,21 @@ class PickYoloTarget(Node):
             time.sleep(0.1)
         self.get_logger().info(f"물체 '{obj_id}' 그리퍼에 부착 완료")
 
+    def detach_object_from_gripper(self, obj_id):
+        """사람에게 건네준(그리퍼 오픈) 후 그리퍼에 붙어있던 도구 장애물을 완전히 제거.
+        REMOVE 연산이라 world 장애물로도 안 남고 씬에서 그냥 사라진다."""
+        from moveit_msgs.msg import AttachedCollisionObject, CollisionObject
+
+        aco = AttachedCollisionObject()
+        aco.link_name = EEF_LINK
+        aco.object.id = obj_id
+        aco.object.operation = CollisionObject.REMOVE
+
+        for _ in range(5):
+            self._attached_collision_pub.publish(aco)
+            time.sleep(0.1)
+        self.get_logger().info(f"물체 '{obj_id}' 그리퍼에서 분리(장애물 제거) 완료")
+
     def wait_for_release(self, tool_name, target) -> bool:
         """배송 위치 도착 후 그리퍼를 열 신호를 기다린다. 셋 중 아무거나 먼저 오면 릴리즈:
         1) hand_obstacle_publisher 기준 손 근접(15cm, 기존 로직)
@@ -1106,7 +1129,8 @@ class PickYoloTarget(Node):
         # 최종 하강: move_cartesian_grasp()가 순수 수직 Cartesian 직선 하강을 우선
         # 시도하고, 특이점 때문에 안 되면 자세는 그대로(수직) 유지한 채 관절공간
         # IK로 폴백한다 (자세하강 참고: move_cartesian_grasp 문서 주석).
-        if not self.move_cartesian_grasp(x, y, z + GRASP_Z_CLEARANCE, yaw, seed_joints=pregrasp_joints):
+        grasp_z_clearance = GRASP_Z_CLEARANCE_BY_CLASS[detected_class]
+        if not self.move_cartesian_grasp(x, y, z + grasp_z_clearance, yaw, seed_joints=pregrasp_joints):
             self.get_logger().error('Cartesian 하강 실패. 기동을 취소합니다.')
             return False
 
@@ -1115,6 +1139,7 @@ class PickYoloTarget(Node):
 
         # 그리퍼를 닫은 후, 월드(base_link)에 있던 장애물을 그리퍼 프레임으로 리어태치
         self.attach_object_to_gripper(obj_id, mesh_msg, gripper_position, gripper_quat)
+        self._attached_obj_id = obj_id  # wait_for_release 성공 후 detach_object_from_gripper에 사용
         time.sleep(0.5)
         self.move_to_joints(pregrasp_joints)
         self.get_logger().info('pick 완료 - 배송 위치로 이동')
@@ -1180,6 +1205,9 @@ class PickYoloTarget(Node):
             released = self.wait_for_release(tool_name, target)
             if released:
                 self.get_logger().info(f'{tool_name} 전달 완료.')
+                if self._attached_obj_id is not None:
+                    self.detach_object_from_gripper(self._attached_obj_id)
+                    self._attached_obj_id = None
             else:
                 self.get_logger().info(f'{tool_name} 릴리즈 대기 종료 (제한시간 초과).')
 

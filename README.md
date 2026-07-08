@@ -96,6 +96,78 @@ python3 src/cobot2_ws/m0609_rg2_bringup/scripts/tool_pick_yolo_target.py
 
 ---
 
+## 🎙️ 4. 음성 HMI + 도구 배송 실행 방법
+
+음성 명령에서 도구와 목적지를 추출한 뒤 HMI에서 작업자가 내용을 확인하면, `/pick_task_tools` 토픽으로 확정 명령을 전달하여 YOLO 기반 도구 배송을 시작합니다.
+
+> [!IMPORTANT]
+> 아래 명령은 **1번의 RealSense, 로봇 드라이버, MoveIt, 손 검출 및 장애물 노드가 이미 실행 중인 상태**를 기준으로 합니다. 음성 인식 전에 `src/cobot2_ws/voice_processing/resource/.env`에 `OPENAI_API_KEY`가 설정되어 있어야 합니다.
+
+### 터미널 1: 음성 키워드 서비스 실행
+```bash
+cd ~/ws_cobot2_pjt
+source install/setup.bash
+ros2 run voice_processing get_keyword
+```
+
+### 터미널 2: FastAPI 백엔드 및 ROS-HMI 브릿지 실행
+```bash
+cd ~/ws_cobot2_pjt
+source install/setup.bash
+cd backend
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+백엔드가 시작되면 `voice_confirm_bridge` 노드가 함께 실행되어 `/confirm_tools`, `/confirm_release`, `/get_keyword`, `/pick_task_tools`를 HMI와 연결합니다.
+
+### 터미널 3: HMI 프론트엔드 실행
+```bash
+cd ~/ws_cobot2_pjt/frontend
+npm install
+npm run dev -- --host 0.0.0.0 --port 5173
+```
+
+브라우저에서 `http://localhost:5173`에 접속합니다. 다른 PC에서 접속할 때는 `localhost` 대신 로봇 PC의 IP 주소를 사용합니다.
+
+### 터미널 4: 도구 배송 노드 실행
+```bash
+cd ~/ws_cobot2_pjt
+source install/setup.bash
+python3 src/cobot2_ws/m0609_rg2_bringup/scripts/tool_pick_yolo_target.py
+```
+
+### HMI에서 음성 명령 실행
+1. HMI 작업 화면에서 **음성 시작**을 누릅니다.
+2. 음성으로 도구와 목적지를 말합니다. 예: `hammer를 user에게 가져다줘`.
+3. 확인 필요 영역에 `hammer → user`가 표시되면 **확인**을 누릅니다.
+4. 확정된 `hammer:user` 명령이 `/pick_task_tools`로 전달되고 도구 배송 노드가 작업을 시작합니다.
+5. 잘못 인식된 경우 **아니오**를 눌러 요청을 취소한 뒤 다시 음성 명령을 실행합니다.
+
+### 명령 전달 확인
+확인 버튼을 눌렀는데 배송이 시작되지 않으면 별도 터미널에서 토픽을 확인합니다.
+
+```bash
+cd ~/ws_cobot2_pjt
+source install/setup.bash
+ros2 topic echo /pick_task_tools
+```
+
+정상 전달 시 다음과 같이 출력됩니다.
+
+```text
+data: hammer:user
+```
+
+노드와 서비스 연결 상태는 아래 명령으로 확인할 수 있습니다.
+
+```bash
+ros2 node list
+ros2 service list | grep -E 'get_keyword|confirm_tools|confirm_release'
+ros2 topic info /pick_task_tools -v
+```
+
+---
+
 
 ## 🧱 3. 젠가 불량 검사 및 실시간 손 회피 시스템 실행 방법 (Real Mode)
 실제 로봇 환경에서 YOLOv8 및 RealSense 카메라를 결합한 젠가 불량 검사 시퀀스(측정 각도 37°, 45°, 52°, 60° 다중 촬영 및 최적 2면 선정)를 기동하고, 동작 중 ROI 기반의 손 회피 기능까지 연동하여 작동시키는 가이드입니다.

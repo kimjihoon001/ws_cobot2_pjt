@@ -1,17 +1,17 @@
-import React from 'react'
+import type { InspectionMapData } from '../types/qc'
 
 interface JengaMapProps {
-  mapDataStr: string | null
+  mapData: InspectionMapData | string | null
 }
 
-export function JengaMapVisualizer({ mapDataStr }: JengaMapProps) {
-  if (!mapDataStr) {
+export function JengaMapVisualizer({ mapData }: JengaMapProps) {
+  if (!mapData) {
     return <div className="qc-image-placeholder">선택된 검사 기록에 맵 데이터가 없습니다.</div>
   }
 
-  let mapData: Record<string, string[]> = {}
+  let parsedMapData: InspectionMapData = {}
   try {
-    mapData = JSON.parse(mapDataStr)
+    parsedMapData = typeof mapData === 'string' ? JSON.parse(mapData) : mapData
   } catch (e) {
     return <div className="qc-image-placeholder">맵 데이터를 파싱할 수 없습니다.</div>
   }
@@ -28,7 +28,7 @@ export function JengaMapVisualizer({ mapDataStr }: JengaMapProps) {
           <h4 style={{ margin: '0 0 10px 0', color: 'var(--text-color)' }}>정면 (Front)</h4>
           {floors.map((floor) => {
             const floorNum = parseInt(floor)
-            const blocks = mapData[floor] || ["O", "O", "O"]
+            const blocks = parsedMapData[floor] || ["O", "O", "O"]
             const isOdd = floorNum % 2 !== 0
             
             if (isOdd) {
@@ -69,7 +69,7 @@ export function JengaMapVisualizer({ mapDataStr }: JengaMapProps) {
           <h4 style={{ margin: '0 0 10px 0', color: 'var(--text-color)' }}>측면 (Side)</h4>
           {floors.map((floor) => {
             const floorNum = parseInt(floor)
-            const blocks = mapData[floor] || ["O", "O", "O"]
+            const blocks = parsedMapData[floor] || ["O", "O", "O"]
             const isOdd = floorNum % 2 !== 0
             
             if (!isOdd) {
@@ -107,11 +107,11 @@ export function JengaMapVisualizer({ mapDataStr }: JengaMapProps) {
       </div>
       <p className="empty-state" style={{ marginTop: '0', marginBottom: '10px' }}>선택된 항목의 6층 젠가 블록 상태입니다.</p>
 
-      {mapData.images && Array.isArray(mapData.images) && mapData.images.length > 0 && (
+      {parsedMapData.images && Array.isArray(parsedMapData.images) && parsedMapData.images.length > 0 && (
         <div style={{ width: '100%', marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
           <h4 style={{ margin: 0, color: 'var(--text-color)', alignSelf: 'flex-start' }}>측면 촬영 이미지</h4>
           <div style={{ display: 'flex', gap: '10px', overflowX: 'auto', paddingBottom: '10px' }}>
-            {mapData.images.map((imgUrl, idx) => (
+            {parsedMapData.images.map((imgUrl, idx) => (
               <img 
                 key={idx} 
                 src={`http://localhost:8000${imgUrl}`} 
