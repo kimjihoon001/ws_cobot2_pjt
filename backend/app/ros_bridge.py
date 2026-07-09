@@ -63,6 +63,7 @@ class VoiceBridgeNode(Node):
         self._get_keyword_cli = self.create_client(Trigger, "get_keyword", callback_group=cb_group)
         self._jenga_inspection_cli = self.create_client(Trigger, "/run_jenga_inspection", callback_group=cb_group)
         self._pick_task_pub = self.create_publisher(String, "pick_task_tools", 10)
+        self._hmi_alert_sub = self.create_subscription(String, "hmi_alert", self._hmi_alert_cb, 10, callback_group=cb_group)
         self._hmi_get_keyword_in_flight = False
         self._last_pick_task_data = ""
         self._last_pick_task_at = 0.0
@@ -258,6 +259,13 @@ class VoiceBridgeNode(Node):
 
     def get_pending_release_payload(self):
         return self._pending_release["payload"] if self._pending_release else None
+
+    def _hmi_alert_cb(self, msg: String):
+        if self._loop:
+            asyncio.run_coroutine_threadsafe(
+                broadcast({"type": "alert", "message": msg.data}),
+                self._loop
+            )
 
 
 def _ros_spin():

@@ -21,10 +21,21 @@ const CONTROL_BUTTONS = [
 ] as const
 
 export function WorkSessionPage() {
-  const { connected, pending, pendingRelease, respond, respondRelease } = useVoiceBridge()
+  const { connected, pending, pendingRelease, respond, respondRelease, hmiAlert } = useVoiceBridge()
 
   return (
-    <div>
+    <div className="work-session-page">
+      <div className="page-header">
+        <h1>Voice Session</h1>
+        <p>음성 인식 기반 로봇 컨트롤 대시보드</p>
+      </div>
+
+      {hmiAlert && (
+        <div style={{ backgroundColor: 'var(--status-critical, #ff4444)', color: 'white', padding: '16px', borderRadius: '8px', marginBottom: '20px', fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '18px' }}>
+          <span>⚠️</span> {hmiAlert}
+        </div>
+      )}
+
       <div className="task-status-row">
         <div className="stat-tile stat-tile-large">
           <div className="stat-tile-label">음성 명령</div>
