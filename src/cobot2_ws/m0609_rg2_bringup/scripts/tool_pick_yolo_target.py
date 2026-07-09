@@ -408,17 +408,41 @@ class PickYoloTarget(Node):
             self.current_hand_pos = [msg.x, msg.y, msg.z]
             self.update_hand_obstacle(msg.x, msg.y, msg.z)
 
-    def _sample_depth(self, cx_px, cy_px):
+    def _sample_depth(self, cx_px, cy_px, axis_vector=None):
         h, w = self.depth_frame.shape[:2]
         if not (0 <= cy_px < h and 0 <= cx_px < w):
             return None
-        y0, y1 = max(0, cy_px - 2), min(h, cy_px + 3)
-        x0, x1 = max(0, cx_px - 2), min(w, cx_px + 3)
-        patch = self.depth_frame[y0:y1, x0:x1].astype(np.float32)
-        patch = patch[patch > 0]
-        if patch.size == 0:
+
+        points_to_sample = []
+        if axis_vector is not None:
+            dx, dy = axis_vector
+            norm = math.hypot(dx, dy)
+            if norm > 0:
+                dx, dy = dx / norm, dy / norm
+                # 중심(cx, cy)을 기준으로 축 방향을 따라 선형으로 픽셀 추출 (-4 ~ +4)
+                for step in range(-4, 5):
+                    x = int(round(cx_px + dx * step))
+                    y = int(round(cy_px + dy * step))
+                    if 0 <= y < h and 0 <= x < w:
+                        points_to_sample.append((y, x))
+        
+        if not points_to_sample:
+            # 선형 추출이 아니면 기존처럼 5x5 영역 추출
+            y0, y1 = max(0, cy_px - 2), min(h, cy_px + 3)
+            x0, x1 = max(0, cx_px - 2), min(w, cx_px + 3)
+            for y in range(y0, y1):
+                for x in range(x0, x1):
+                    points_to_sample.append((y, x))
+
+        patch = [self.depth_frame[y, x] for y, x in points_to_sample if self.depth_frame[y, x] > 0]
+        if not patch:
             return None
-        depth_m = float(np.median(patch)) / 1000.0
+
+        patch_sorted = np.sort(patch)
+        # 하위 20% (가장 카메라에 가까운 픽셀들)의 평균 사용 (배경/테이블 노이즈 제거)
+        cutoff_idx = max(1, int(len(patch_sorted) * 0.2))
+        depth_m = float(np.mean(patch_sorted[:cutoff_idx])) / 1000.0
+
         if not (MIN_DEPTH_M <= depth_m <= MAX_DEPTH_M):
             return None
         return depth_m
@@ -515,12 +539,14 @@ class PickYoloTarget(Node):
             if (head_px[0] == 0 and head_px[1] == 0) or (tail_px[0] == 0 and tail_px[1] == 0):
                 # 키포인트가 제대로 잡히지 않은 경우 기존 바운딩 박스 중심으로 폴백
                 cx_px, cy_px = int((x1 + x2) / 2), int((y1 + y2) / 2)
+                axis_vector = None
             else:
                 # 머리 쪽 30%, 꼬리 쪽 70% 가중치를 주어 꼬리에 더 가까운 곳을 선택
                 cx_px = int(head_px[0] * 0.3 + tail_px[0] * 0.7)
                 cy_px = int(head_px[1] * 0.3 + tail_px[1] * 0.7)
+                axis_vector = (head_px[0] - tail_px[0], head_px[1] - tail_px[1])
 
-            depth_m = self._sample_depth(cx_px, cy_px)
+            depth_m = self._sample_depth(cx_px, cy_px, axis_vector=axis_vector)
             if depth_m is None:
                 continue
 
