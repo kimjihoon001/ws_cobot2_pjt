@@ -1551,7 +1551,9 @@ class PickYoloTarget(Node):
             self.get_logger().info(f'{class_name} 탐지 대기중...')
             detection = self.detect_once(target_class=class_name)
             if detection is None:
-                self.get_logger().error(f'{tool_name}({class_name}) 탐지 실패 (타임아웃) - 건너뜀')
+                self.get_logger().error("도구를 발견하지 못했습니다")
+                # 툴 탐지 실패 시 조인트값 기준 0,0,90,0,90,0의 위치로 이동
+                self.move_to_joints([math.radians(d) for d in [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]])
                 continue
 
             delivery_joints_deg = TOOL_DELIVERY_JOINTS_DEG.get(class_name, TOOL_SCAN_JOINTS_DEG)
