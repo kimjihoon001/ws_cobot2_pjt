@@ -1,30 +1,54 @@
+import { useState } from 'react'
 import { useVoiceBridge } from '../hooks/useVoiceBridge'
 import { useRobotStatus } from '../hooks/useRobotStatus'
 import { VoiceStartButton } from '../components/VoiceStartButton'
+import * as robotApi from '../api/robot'
 
 const JOINTS = [
-  { name: 'joint_1', angle: '-' },
-  { name: 'joint_2', angle: '-' },
-  { name: 'joint_3', angle: '-' },
-  { name: 'joint_4', angle: '-' },
-  { name: 'joint_5', angle: '-' },
-  { name: 'joint_6', angle: '-' },
-  { name: 'gripper', angle: '-' },
+  'joint_1',
+  'joint_2',
+  'joint_3',
+  'joint_4',
+  'joint_5',
+  'joint_6',
+  'gripper',
 ]
 
 const CONTROL_BUTTONS = [
-  { label: '홈 위치 이동', variant: 'accent' },
-  { label: '일시정지', variant: 'warning' },
-  { label: '재개', variant: 'good' },
-  { label: '정지', variant: 'critical-solid' },
-  { label: '그리퍼 열기', variant: 'accent' },
-  { label: '그리퍼 닫기', variant: 'accent' },
+  { label: '홈 위치 이동', variant: 'accent', action: undefined },
+  { label: '일시정지', variant: 'warning', action: undefined },
+  { label: '비상해제', variant: 'good', action: 'release_estop' },
+  { label: '비상정지', variant: 'critical-solid', action: 'emergency_stop' },
+  { label: '그리퍼 열기', variant: 'accent', action: undefined },
+  { label: '그리퍼 닫기', variant: 'accent', action: undefined },
 ] as const
 
 export function WorkSessionPage() {
   const { connected, pending, pendingRelease, respond, respondRelease } = useVoiceBridge()
   const robotStatus = useRobotStatus()
+  const [robotCommandMessage, setRobotCommandMessage] = useState('')
+  const [robotCommandRunning, setRobotCommandRunning] = useState<string | null>(null)
   const robotStatusColor = robotStatus.connected ? 'var(--status-good)' : 'var(--status-critical)'
+  const formatJointValue = (name: string) => {
+    const value = robotStatus.joints[name]
+    if (value === null || value === undefined) return '-'
+    const unit = robotStatus.joint_units[name] ?? ''
+    return `${value.toFixed(name === 'gripper' ? 1 : 2)} ${unit}`.trim()
+  }
+  const runControlAction = async (action?: string) => {
+    if (!action) return
+    setRobotCommandRunning(action)
+    setRobotCommandMessage('')
+    try {
+      const result =
+        action === 'emergency_stop' ? await robotApi.emergencyStop() : await robotApi.releaseEstop()
+      setRobotCommandMessage(result.message)
+    } catch (error) {
+      setRobotCommandMessage(error instanceof Error ? error.message : '명령 실패')
+    } finally {
+      setRobotCommandRunning(null)
+    }
+  }
 
   return (
     <div>
@@ -36,18 +60,21 @@ export function WorkSessionPage() {
       </div>
 
       <div className="control-grid">
-        {CONTROL_BUTTONS.map(({ label, variant }) => (
+        {CONTROL_BUTTONS.map(({ label, variant, action }) => (
           <button
             type="button"
             className={`control-btn control-btn-${variant}`}
             key={label}
-            disabled
+            disabled={!action || robotCommandRunning !== null || (action === 'release_estop' && !robotStatus.estop)}
+            onClick={() => void runControlAction(action)}
           >
-            {label}
+            {robotCommandRunning === action ? '처리 중' : label}
           </button>
         ))}
       </div>
-      <p className="empty-state">ROS2 연동 후 버튼이 활성화됩니다.</p>
+      <p className="empty-state">
+        {robotCommandMessage || '비상정지는 DSR move_stop과 servo_off를 동시에 요청합니다.'}
+      </p>
 
       <div className="task-status-row">
         <div className="stat-tile stat-tile-large">
@@ -139,10 +166,10 @@ export function WorkSessionPage() {
           </tr>
         </thead>
         <tbody>
-          {JOINTS.map((joint) => (
-            <tr key={joint.name}>
-              <td>{joint.name}</td>
-              <td className="num-col">{joint.angle}</td>
+          {JOINTS.map((jointName) => (
+            <tr key={jointName}>
+              <td>{jointName}</td>
+              <td className="num-col">{formatJointValue(jointName)}</td>
             </tr>
           ))}
         </tbody>

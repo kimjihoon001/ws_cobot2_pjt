@@ -22,6 +22,7 @@ except ImportError:
 from tf2_ros import Buffer, TransformListener
 from ament_index_python.packages import get_package_share_directory
 from std_srvs.srv import Trigger, Empty
+from std_msgs.msg import String
 from od_msg.srv import SrvDepthPosition
 from robot_control.onrobot import RG
 
@@ -224,6 +225,7 @@ class JengaInspectorNode(Node):
         self.hand_detected = False
         self.current_hand_pos = None
         self.active_goal_handle = None
+        self.hmi_stop_requested = False
         self.in_evasion = False
         self.in_push_sequence = False
         self.push_hand_seen = False
@@ -240,8 +242,29 @@ class JengaInspectorNode(Node):
             10,
             callback_group=ReentrantCallbackGroup()
         )
+        self.hmi_stop_sub = self.create_subscription(
+            String,
+            '/hmi/emergency_stop',
+            self.hmi_stop_callback,
+            10,
+            callback_group=ReentrantCallbackGroup()
+        )
         
         self.get_logger().info("JengaInspectorNode initialized. Service '/run_jenga_inspection' is ready.")
+
+    def hmi_stop_callback(self, msg):
+        if msg.data == "release":
+            self.hmi_stop_requested = False
+            self.get_logger().info("HMI 긴급정지 해제 신호 수신.")
+            return
+        self.hmi_stop_requested = True
+        self.get_logger().warn("HMI 긴급정지 신호 수신 - 현재 MoveGroup goal 취소 요청.")
+        goal_handle = self.active_goal_handle
+        if goal_handle is not None:
+            try:
+                goal_handle.cancel_goal_async()
+            except Exception as e:
+                self.get_logger().error(f"HMI 긴급정지 goal 취소 요청 실패: {e}")
 
     def info_callback(self, msg):
         if self.intrinsics is None:
@@ -747,7 +770,7 @@ class JengaInspectorNode(Node):
         hand_blocks_motion = lambda: self.hand_detected or (
             getattr(self, 'in_push_sequence', False)
             and (getattr(self, 'push_hand_seen', False) or getattr(self, 'push_cancel_requested', False))
-        )
+        ) or self.hmi_stop_requested
 
         # Convert degrees to radians
         joint_positions_rad = [np.radians(angle) for angle in joint_positions_deg]
@@ -782,8 +805,8 @@ class JengaInspectorNode(Node):
 
         # Check before sending goal (bypass check if in safety evasion mode)
         if hand_blocks_motion() and not getattr(self, 'in_evasion', False):
-            self.last_moveit_error_code = 'HAND_DETECTED'
-            self.get_logger().warn('Hand detected before planning! Aborting motion.')
+            self.last_moveit_error_code = 'HMI_STOP' if self.hmi_stop_requested else 'HAND_DETECTED'
+            self.get_logger().warn('정지 조건 감지: planning 전 이동을 중단합니다.')
             return False
 
         self.get_logger().info('Sending MoveGroup Goal...')
@@ -792,9 +815,9 @@ class JengaInspectorNode(Node):
         
         while rclpy.ok() and not send_future.done():
             if hand_blocks_motion() and not getattr(self, 'in_evasion', False):
-                self.last_moveit_error_code = 'HAND_DETECTED'
+                self.last_moveit_error_code = 'HMI_STOP' if self.hmi_stop_requested else 'HAND_DETECTED'
                 cancel_after_accept = True
-                self.get_logger().warn('Hand detected while sending goal! Cancelling as soon as MoveGroup accepts it.')
+                self.get_logger().warn('정지 조건 감지: MoveGroup goal 수락 즉시 취소합니다.')
                 if getattr(self, 'in_push_sequence', False):
                     self.request_doosan_quick_stop("밀기 goal 전송 중 손 감지")
                 break
@@ -825,7 +848,7 @@ class JengaInspectorNode(Node):
         aborted = False
         while rclpy.ok() and not result_future.done():
             if hand_blocks_motion() and not getattr(self, 'in_evasion', False):
-                self.get_logger().warn('Hand detected during execution phase! Cancelling current motion...')
+                self.get_logger().warn('정지 조건 감지: 현재 MoveGroup 실행을 취소합니다.')
                 if getattr(self, 'in_push_sequence', False):
                     self.request_doosan_quick_stop("밀기 실행 중 손 감지")
                 cancel_future = goal_handle.cancel_goal_async()
@@ -840,7 +863,7 @@ class JengaInspectorNode(Node):
         self.active_goal_handle = None
         
         if aborted:
-            self.last_moveit_error_code = 'HAND_DETECTED'
+            self.last_moveit_error_code = 'HMI_STOP' if self.hmi_stop_requested else 'HAND_DETECTED'
             return False
 
         result = result_future.result().result
@@ -851,6 +874,24 @@ class JengaInspectorNode(Node):
         else:
             self.get_logger().error(f'MoveGroup execution failed with error code: {result.error_code.val}')
             return False
+
+    def recover_to_push_approach(self):
+        """밀기 중 취소 후 홈이 아니라 밀기 1 위치(PUSH_APPROACH_JOINTS_DEG)로 복귀한다."""
+        if self.hmi_stop_requested:
+            self.get_logger().warn("HMI 긴급정지 상태라 밀기 1 위치 복귀 명령을 보내지 않습니다.")
+            return False
+
+        self.get_logger().warn("밀기 동작 취소됨 - 현재 동작 정지 후 밀기 1 위치로 복귀합니다.")
+        self.clear_hand_obstacle()
+        self.call_clear_octomap()
+        time.sleep(0.1)
+
+        previous_evasion = self.in_evasion
+        self.in_evasion = True
+        try:
+            return self.move_to_joints_moveit(PUSH_APPROACH_JOINTS_DEG)
+        finally:
+            self.in_evasion = previous_evasion
 
     def execute_safety_evasion(self):
         """Safely retreats to home position (JReady) by avoiding the hand obstacle.
@@ -1174,6 +1215,10 @@ class JengaInspectorNode(Node):
 
     def handle_run_jenga_inspection(self, request, response):
         """Service callback that spawns the control loop in a separate thread to prevent deadlocks."""
+        if self.hmi_stop_requested:
+            response.success = False
+            response.message = "HMI 긴급정지 상태라 검사를 시작할 수 없습니다."
+            return response
         self.get_logger().info("Starting Jenga Inspection sequence in a separate thread...")
         thread = threading.Thread(target=self._run_inspection_thread, args=(request, response))
         thread.start()
@@ -1193,7 +1238,13 @@ class JengaInspectorNode(Node):
                 f"컨베이어를 검사장소로 이동합니다 (MOVE:{CONVEYOR_MOVE_TO_INSPECTION_STEPS})..."
             )
             self.conveyor.move(CONVEYOR_MOVE_TO_INSPECTION_STEPS)
-            time.sleep(CONVEYOR_MOVE_TO_INSPECTION_WAIT_SEC)
+            deadline = time.time() + CONVEYOR_MOVE_TO_INSPECTION_WAIT_SEC
+            while time.time() < deadline:
+                if self.hmi_stop_requested:
+                    response.success = False
+                    response.message = "HMI 긴급정지로 검사 시작 전 중단됨"
+                    return
+                time.sleep(0.1)
             self.get_logger().info("컨베이어 도착 예상 - 검사를 시작합니다.")
         else:
             self.get_logger().warn("컨베이어 미연결 - 이동 없이 바로 검사를 시작합니다.")
@@ -1563,17 +1614,12 @@ class JengaInspectorNode(Node):
 
                 if push_aborted:
                     if attempt < max_push_attempts - 1:
-                        self.get_logger().warn("밀기 작업 취소됨. 안전을 위해 즉시 회피 위치([0, 0, 90, 0, 90, 0])로 후퇴합니다.")
-                        
-                        # 지정된 회피 위치 조인트 각도
-                        ESCAPE_JOINTS_DEG = [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]
-                        
-                        # 손이 있어도 무조건 안전한 뒤쪽(회피 위치)으로 후퇴하도록 강제
-                        self.in_evasion = True
-                        self.move_to_joints_moveit(ESCAPE_JOINTS_DEG)
-                        self.in_evasion = False
-
-                        self.get_logger().warn("회피 위치로 후퇴 완료. 2초간 안전 대기 후 다시 밀기를 시도합니다.")
+                        recovered = self.recover_to_push_approach()
+                        if recovered:
+                            self.get_logger().warn("밀기 1 위치 복귀 완료. 2초간 안전 대기 후 다시 밀기를 시도합니다.")
+                        else:
+                            self.get_logger().error("밀기 1 위치 복귀 실패. 안전을 위해 밀기 재시도를 중단합니다.")
+                            break
                         time.sleep(2.0)
 
                         self.get_logger().warn(f"안전 확보됨. 다시 밀기를 시도합니다... (남은 재시도: {max_push_attempts - attempt - 1})")

@@ -72,6 +72,7 @@ GRASP_REFINE_MAX_XY_ADJUST = 0.010  # 파지 직전 x/y 반영 최대 허용량 
 GRASP_REFINE_MAX_YAW_ADJUST = math.radians(12.0)
 HAMMER_GRASP_REFINE_MAX_XY_FOR_ANY_ADJUST = 0.008
 GRIPPER_CLOSE_SETTLE_SEC = 0.35
+GRIPPER_GRASP_CLOSE_WIDTH_MM = 10.0  # 완전 닫기 대신 10 mm 폭만으로 닫음
 # 감지 z는 원통형 손잡이의 맨 윗면(카메라에 보이는 지점)이라 아래(중심축 쪽)로
 # 내려가서 잡음. 위로 주면 손잡이 중심보다 한참 높은 허공에서 손가락이 닫혀 놓침.
 # 도구마다 손잡이 두께/무게중심이 달라 최적값이 다름 - 도구별로 따로 관리.
@@ -79,8 +80,8 @@ GRIPPER_CLOSE_SETTLE_SEC = 0.35
 # 원인이 "너무 얕게(높이) 내려가서"였음 -> -0.002(더 얕게)가 아니라 반대로 더 깊게
 # 내려가야 함 — 실측 미세조정 필요한 값.
 GRASP_Z_CLEARANCE_BY_CLASS = {
-    'tool-hammer': -0.0058,
-    'screw2': -0.0083,
+    'tool-hammer': -0.017,
+    'screw2': -0.018,
 }
 GRIP_SUCCESS_MIN_WIDTH_MM_BY_CLASS = {
     'tool-hammer': 15.0,
@@ -339,6 +340,10 @@ class PickYoloTarget(Node):
         # [HRI 비전 기반 손 감지]: hand_obstacle_publisher가 발행하는 손의 3D 좌표 구독
         self.current_hand_pos = None
         self.create_subscription(Point, '/hand_position', self._hand_position_cb, 10)
+        self.hmi_stop_requested = False
+        self._active_move_goal_handle = None
+        self._active_execute_goal_handle = None
+        self.create_subscription(String, '/hmi/emergency_stop', self._hmi_stop_cb, 10)
 
         # 현재 그리퍼에 부착된 도구 장애물 id (릴리즈 후 detach_object_from_gripper로 제거)
         self._attached_obj_id = None
@@ -431,6 +436,41 @@ class PickYoloTarget(Node):
 
     def _gripper_status_cb(self, msg):
         self.current_gripper_status = msg
+
+    def _hmi_stop_cb(self, msg):
+        if msg.data == 'release':
+            self.hmi_stop_requested = False
+            self.get_logger().info('HMI 긴급정지 해제 신호 수신.')
+            return
+        self.hmi_stop_requested = True
+        self._pending_tools_message = None
+        self.get_logger().warn('HMI 긴급정지 신호 수신 - 현재 MoveIt goal 취소 요청.')
+        for goal_handle in (self._active_move_goal_handle, self._active_execute_goal_handle):
+            if goal_handle is not None:
+                try:
+                    goal_handle.cancel_goal_async()
+                except Exception as e:
+                    self.get_logger().error(f'HMI 긴급정지 goal 취소 요청 실패: {e}')
+
+    def _spin_until_future_or_stop(self, future, goal_handle=None):
+        while rclpy.ok() and not future.done():
+            if self.hmi_stop_requested:
+                if goal_handle is not None:
+                    try:
+                        goal_handle.cancel_goal_async()
+                    except Exception as e:
+                        self.get_logger().error(f'HMI 긴급정지 goal 취소 요청 실패: {e}')
+                return False
+            rclpy.spin_once(self, timeout_sec=0.02)
+        return future.done()
+
+    def _sleep_or_stop(self, seconds: float) -> bool:
+        deadline = time.monotonic() + seconds
+        while rclpy.ok() and time.monotonic() < deadline:
+            if self.hmi_stop_requested:
+                return False
+            rclpy.spin_once(self, timeout_sec=min(0.05, max(0.0, deadline - time.monotonic())))
+        return not self.hmi_stop_requested
 
     @staticmethod
     def _angle_delta(a, b):
@@ -599,6 +639,9 @@ class PickYoloTarget(Node):
         기존처럼 등록된 아무 클래스나 최고 confidence로 고른다."""
         deadline = time.monotonic() + timeout_sec
         while rclpy.ok() and time.monotonic() < deadline:
+            if self.hmi_stop_requested:
+                self.get_logger().warn('HMI 긴급정지로 탐지를 중단합니다.')
+                return None
             rclpy.spin_once(self, timeout_sec=0.1)
             if self.color_frame is None or self.depth_frame is None or self.intrinsics is None:
                 continue
@@ -677,10 +720,15 @@ class PickYoloTarget(Node):
         self.get_logger().info(
             f'{stage_label} 재검출 시작: {target_class}, {sample_count}프레임'
         )
-        time.sleep(settle_sec)
+        if not self._sleep_or_stop(settle_sec):
+            self.get_logger().warn(f'HMI 긴급정지로 {stage_label} 재검출 대기 중단')
+            return None
         samples = []
 
         for sample_idx in range(sample_count):
+            if self.hmi_stop_requested:
+                self.get_logger().warn(f'HMI 긴급정지로 {stage_label} 재검출 중단')
+                return None
             # 이동 전에 수신한 프레임으로 재검출하지 않도록 새 프레임을 강제한다.
             self.color_frame = None
             self.depth_frame = None
@@ -858,6 +906,9 @@ class PickYoloTarget(Node):
         return axis_angle, yaw
 
     def move_to_pose(self, pose: Pose, speed_scale=SPEED_SCALE):
+        if self.hmi_stop_requested:
+            self.get_logger().warn('HMI 긴급정지 상태라 이동을 시작하지 않습니다.')
+            return False
         sphere = SolidPrimitive()
         sphere.type = SolidPrimitive.SPHERE
         sphere.dimensions = [0.01]
@@ -901,14 +952,25 @@ class PickYoloTarget(Node):
         self.get_logger().info(
             f'이동: ({pose.position.x:.3f}, {pose.position.y:.3f}, {pose.position.z:.3f})')
         send_future = self._move_ac.send_goal_async(goal_msg)
-        rclpy.spin_until_future_complete(self, send_future)
+        if not self._spin_until_future_or_stop(send_future):
+            self.get_logger().warn('HMI 긴급정지로 MoveGroup goal 전송 대기 중단')
+            return False
         goal_handle = send_future.result()
         if not goal_handle.accepted:
             self.get_logger().error('목표가 move_group에서 거부됨')
             return False
 
+        self._active_move_goal_handle = goal_handle
+        if self.hmi_stop_requested:
+            goal_handle.cancel_goal_async()
+            self._active_move_goal_handle = None
+            return False
         result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self, result_future)
+        if not self._spin_until_future_or_stop(result_future, goal_handle):
+            self.get_logger().warn('HMI 긴급정지로 MoveGroup goal 실행 취소')
+            self._active_move_goal_handle = None
+            return False
+        self._active_move_goal_handle = None
         result = result_future.result().result
 
         if result.error_code.val == 1:
@@ -918,13 +980,18 @@ class PickYoloTarget(Node):
         return False
 
     def gripper_command(self, command: str):
+        if self.hmi_stop_requested:
+            self.get_logger().warn('HMI 긴급정지 상태라 그리퍼 명령을 보내지 않습니다.')
+            return False
         if not USE_GRIPPER:
             self.get_logger().info(f'(USE_GRIPPER=False, 그리퍼 명령 생략: {command!r})')
             return True
         req = SetCommand.Request()
         req.command = command
         future = self._gripper_cli.call_async(req)
-        rclpy.spin_until_future_complete(self, future)
+        if not self._spin_until_future_or_stop(future):
+            self.get_logger().warn('HMI 긴급정지로 그리퍼 명령 응답 대기 중단')
+            return False
         res = future.result()
         if res is None or not res.success:
             self.get_logger().error(f'그리퍼 명령 실패: {command!r}')
@@ -935,6 +1002,9 @@ class PickYoloTarget(Node):
         grasp처럼 최종 자세가 틀어지면 안 되는 곳에서는 tilts=[(0.0, 0.0)]로 순수
         수직만 시도하도록 제한할 수 있다."""
         for d_roll, d_pitch in tilts:
+            if self.hmi_stop_requested:
+                self.get_logger().warn('HMI 긴급정지로 IK 계산을 중단합니다.')
+                return None
             pose = Pose()
             pose.position.x = x
             pose.position.y = y
@@ -972,7 +1042,9 @@ class PickYoloTarget(Node):
             req.ik_request.pose_stamped = pose_stamped
             
             future = self._ik_cli.call_async(req)
-            rclpy.spin_until_future_complete(self, future)
+            if not self._spin_until_future_or_stop(future):
+                self.get_logger().warn('HMI 긴급정지로 IK 응답 대기 중단')
+                return None
             res = future.result()
             
             if res is not None and res.error_code.val == 1:
@@ -997,6 +1069,9 @@ class PickYoloTarget(Node):
         return None
 
     def move_to_joints(self, joint_positions: list[float], speed_scale=SPEED_SCALE):
+        if self.hmi_stop_requested:
+            self.get_logger().warn('HMI 긴급정지 상태라 관절 이동을 시작하지 않습니다.')
+            return False
         goal_constraints = Constraints()
         joint_names = [f"joint_{i}" for i in range(1, 7)]
         for name, pos in zip(joint_names, joint_positions):
@@ -1025,17 +1100,32 @@ class PickYoloTarget(Node):
         goal_msg.planning_options = opts
 
         while rclpy.ok():
+            if self.hmi_stop_requested:
+                self.get_logger().warn('HMI 긴급정지로 관절 이동 루프 중단')
+                return False
             self.get_logger().info(f'관절 공간 이동: {[f"{math.degrees(p):.1f}" for p in joint_positions]} deg')
             send_future = self._move_ac.send_goal_async(goal_msg)
-            rclpy.spin_until_future_complete(self, send_future)
+            if not self._spin_until_future_or_stop(send_future):
+                self.get_logger().warn('HMI 긴급정지로 MoveGroup goal 전송 대기 중단')
+                return False
             goal_handle = send_future.result()
             if not goal_handle.accepted:
                 self.get_logger().error('목표가 move_group에서 거부됨. 손에 막혔을 가능성이 높습니다. 2.0초 뒤 재시도...')
-                time.sleep(2.0)
+                if not self._sleep_or_stop(2.0):
+                    return False
                 continue
 
+            self._active_move_goal_handle = goal_handle
+            if self.hmi_stop_requested:
+                goal_handle.cancel_goal_async()
+                self._active_move_goal_handle = None
+                return False
             result_future = goal_handle.get_result_async()
-            rclpy.spin_until_future_complete(self, result_future)
+            if not self._spin_until_future_or_stop(result_future, goal_handle):
+                self.get_logger().warn('HMI 긴급정지로 MoveGroup goal 실행 취소')
+                self._active_move_goal_handle = None
+                return False
+            self._active_move_goal_handle = None
             result = result_future.result().result
 
             if result.error_code.val == 1:
@@ -1045,7 +1135,8 @@ class PickYoloTarget(Node):
                 self.get_logger().error(
                     f'이동 실패 (error_code={result.error_code.val}). 경로가 손에 의해 막혔을 수 있습니다. 2.0초 뒤 재시도...'
                 )
-                time.sleep(2.0)
+                if not self._sleep_or_stop(2.0):
+                    return False
 
         return False
 
@@ -1066,8 +1157,14 @@ class PickYoloTarget(Node):
         req.jump_threshold = 0.0
         req.avoid_collisions = True
 
+        if self.hmi_stop_requested:
+            self.get_logger().warn('HMI 긴급정지 상태라 Cartesian 이동을 시작하지 않습니다.')
+            return False
+
         future = self._cartesian_cli.call_async(req)
-        rclpy.spin_until_future_complete(self, future)
+        if not self._spin_until_future_or_stop(future):
+            self.get_logger().warn('HMI 긴급정지로 Cartesian path 계산 중단')
+            return False
         res = future.result()
         if res is None or res.fraction < 0.99:
             fraction = res.fraction if res is not None else 0.0
@@ -1083,14 +1180,25 @@ class PickYoloTarget(Node):
         goal_msg = ExecuteTrajectory.Goal()
         goal_msg.trajectory = scale_trajectory_speed(res.solution, speed_scale)
         send_future = self._execute_ac.send_goal_async(goal_msg)
-        rclpy.spin_until_future_complete(self, send_future)
+        if not self._spin_until_future_or_stop(send_future):
+            self.get_logger().warn('HMI 긴급정지로 Cartesian 실행 goal 전송 중단')
+            return False
         goal_handle = send_future.result()
         if not goal_handle.accepted:
             self.get_logger().error('Cartesian 경로 실행 목표가 거부됨')
             return False
 
+        self._active_execute_goal_handle = goal_handle
+        if self.hmi_stop_requested:
+            goal_handle.cancel_goal_async()
+            self._active_execute_goal_handle = None
+            return False
         result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self, result_future)
+        if not self._spin_until_future_or_stop(result_future, goal_handle):
+            self.get_logger().warn('HMI 긴급정지로 Cartesian 실행 취소')
+            self._active_execute_goal_handle = None
+            return False
+        self._active_execute_goal_handle = None
         result = result_future.result().result
         if result.error_code.val == 1:
             self.get_logger().info('Cartesian 하강 이동 완료')
@@ -1151,8 +1259,11 @@ class PickYoloTarget(Node):
         ]
         
         for _ in range(5):
+            if self.hmi_stop_requested:
+                return
             self._attached_collision_pub.publish(aco)
-            time.sleep(0.1)
+            if not self._sleep_or_stop(0.1):
+                return
         self.get_logger().info(f"물체 '{obj_id}'가 '{link_name}'에 부착된 상태(실제 장애물 판정)로 스폰되었습니다.")
 
     def attach_object_to_gripper(self, obj_id, mesh_msg, position, orientation_quat):
@@ -1191,8 +1302,11 @@ class PickYoloTarget(Node):
         ]
         
         for _ in range(5):
+            if self.hmi_stop_requested:
+                return
             self._attached_collision_pub.publish(aco)
-            time.sleep(0.1)
+            if not self._sleep_or_stop(0.1):
+                return
         self.get_logger().info(f"물체 '{obj_id}' 그리퍼에 부착 완료")
 
     def detach_object_from_gripper(self, obj_id):
@@ -1211,9 +1325,12 @@ class PickYoloTarget(Node):
         world_obj.operation = CollisionObject.REMOVE
 
         for _ in range(5):
+            if self.hmi_stop_requested:
+                return
             self._attached_collision_pub.publish(aco)
             self._collision_pub.publish(world_obj)
-            time.sleep(0.1)
+            if not self._sleep_or_stop(0.1):
+                return
         self.get_logger().info(
             f"물체 '{obj_id}' attached/world 장애물 제거 완료"
         )
@@ -1234,8 +1351,11 @@ class PickYoloTarget(Node):
         start_time = self.get_clock().now()
 
         # 안정적인 토픽 수신을 위한 대기
-        time.sleep(1.0)
+        if not self._sleep_or_stop(1.0):
+            return False
         for _ in range(5):
+            if self.hmi_stop_requested:
+                return False
             rclpy.spin_once(self, timeout_sec=0.05)
 
         release_req = ConfirmTools.Request()
@@ -1244,6 +1364,9 @@ class PickYoloTarget(Node):
         release_future = self._confirm_release_cli.call_async(release_req)
 
         while rclpy.ok():
+            if self.hmi_stop_requested:
+                self.get_logger().warn('HMI 긴급정지로 배송 완료 대기를 중단합니다.')
+                return False
             current_time = self.get_clock().now()
             duration = (current_time - start_time).nanoseconds / 1e9
             if duration > FORCE_MONITORING_TIMEOUT:
@@ -1277,7 +1400,8 @@ class PickYoloTarget(Node):
                         self.gripper_command('o')
                         return True
 
-            time.sleep(0.1)
+            if not self._sleep_or_stop(0.1):
+                return False
 
         return False
 
@@ -1488,9 +1612,11 @@ class PickYoloTarget(Node):
             return False
 
         width_before_mm, _, _, _ = self.get_gripper_gap_mm()
-        if not self.gripper_command('c'):
+        close_width_cmd = str(int(GRIPPER_GRASP_CLOSE_WIDTH_MM * 10.0))
+        if not self.gripper_command(close_width_cmd):
             return False
-        time.sleep(GRIPPER_CLOSE_SETTLE_SEC)
+        if not self._sleep_or_stop(GRIPPER_CLOSE_SETTLE_SEC):
+            return False
         width_after_mm, width_source, grip_detected, gripper_busy = self.get_gripper_gap_mm()
         self.log_grip_result(
             detected_class, width_before_mm, width_after_mm, width_source, grip_detected, gripper_busy
@@ -1499,11 +1625,12 @@ class PickYoloTarget(Node):
         # 그리퍼를 닫은 후, 월드(base_link)에 있던 장애물을 그리퍼 프레임으로 리어태치
         self.attach_object_to_gripper(obj_id, mesh_msg, gripper_position, gripper_quat)
         self._attached_obj_id = obj_id  # wait_for_release 성공 후 detach_object_from_gripper에 사용
-        time.sleep(0.5)
-        self.move_to_joints(pregrasp_joints)
+        if not self._sleep_or_stop(0.5):
+            return False
+        if not self.move_to_joints(pregrasp_joints):
+            return False
         self.get_logger().info('pick 완료 - 배송 위치로 이동')
-        self.move_to_joints([math.radians(d) for d in delivery_joints_deg])
-        return True
+        return self.move_to_joints([math.radians(d) for d in delivery_joints_deg])
 
     def _pick_task_tools_cb(self, msg):
         self._pending_tools_message = msg.data
@@ -1517,14 +1644,22 @@ class PickYoloTarget(Node):
         while rclpy.ok():
             rclpy.spin_once(self, timeout_sec=0.2)
             if self._pending_tools_message is not None:
+                if self.hmi_stop_requested:
+                    self._pending_tools_message = None
+                    self.get_logger().warn('HMI 긴급정지 상태라 대기 중인 픽업 작업을 폐기합니다.')
+                    continue
                 tools_message = self._pending_tools_message
                 self._pending_tools_message = None
                 self.perform_pick_task(tools_message)
                 self.get_logger().info('/pick_task_tools 대기로 복귀...')
 
     def perform_pick_task(self, tools_message: str):
+        if self.hmi_stop_requested:
+            self.get_logger().warn('HMI 긴급정지 상태라 픽업 작업을 시작하지 않습니다.')
+            return
         self.get_logger().info('홈 자세로 이동 중...')
-        self.move_to_joints([math.radians(d) for d in HOME_JOINTS_DEG])
+        if not self.move_to_joints([math.radians(d) for d in HOME_JOINTS_DEG]):
+            return
 
         # "hammer:user screwdriver:user" 형식 파싱. 빈 메시지면 기본형(도구 필요 없음)이거나
         # 아무것도 확정 안 된 것 - 둘 다 집을 도구가 없다는 뜻이라 그대로 종료.
@@ -1540,13 +1675,17 @@ class PickYoloTarget(Node):
             return
 
         for tool_name, target in pairs:
+            if self.hmi_stop_requested:
+                self.get_logger().warn('HMI 긴급정지로 남은 도구 배송을 중단합니다.')
+                break
             class_name = VOICE_TOOL_TO_CLASS.get(tool_name)
             if class_name is None:
                 self.get_logger().error(f'알 수 없는 도구 이름: {tool_name} - 건너뜀')
                 continue
 
             self.get_logger().info(f'[{tool_name} -> {target}] 스캔 위치로 이동 중...')
-            self.move_to_joints([math.radians(d) for d in TOOL_SCAN_JOINTS_DEG])
+            if not self.move_to_joints([math.radians(d) for d in TOOL_SCAN_JOINTS_DEG]):
+                break
 
             self.get_logger().info(f'{class_name} 탐지 대기중...')
             detection = self.detect_once(target_class=class_name)
@@ -1573,7 +1712,8 @@ class PickYoloTarget(Node):
             self.clear_hand_obstacle()
 
         self.get_logger().info('모든 도구 배송 완료. 홈으로 복귀합니다.')
-        self.move_to_joints([math.radians(d) for d in HOME_JOINTS_DEG])
+        if not self.hmi_stop_requested:
+            self.move_to_joints([math.radians(d) for d in HOME_JOINTS_DEG])
 
 
 def main():

@@ -22,6 +22,26 @@ def robot_status():
                 "voice": False,
                 "hand": False,
             },
+            "estop": False,
+            "estop_message": "",
+            "joints": {
+                "joint_1": None,
+                "joint_2": None,
+                "joint_3": None,
+                "joint_4": None,
+                "joint_5": None,
+                "joint_6": None,
+                "gripper": None,
+            },
+            "joint_units": {
+                "joint_1": "deg",
+                "joint_2": "deg",
+                "joint_3": "deg",
+                "joint_4": "deg",
+                "joint_5": "deg",
+                "joint_6": "deg",
+                "gripper": "mm",
+            },
             "last_pick_task": "",
             "ros_bridge": False,
         }
@@ -48,3 +68,19 @@ def deliver_hammer_screwdriver():
     """HMI 직접 실행 버튼 -> 음성 명령 없이 hammer/screwdriver 전달을 시작한다."""
     started = ros_bridge._bridge.deliver_hammer_screwdriver() if ros_bridge._bridge else False
     return {"started": started}
+
+
+@router.post("/emergency_stop")
+def emergency_stop():
+    """HMI 비상정지 -> DSR move_stop + servo_off 요청."""
+    if not ros_bridge._bridge:
+        return {"success": False, "estop": False, "message": "ROS 브릿지 미연결"}
+    return ros_bridge._bridge.emergency_stop()
+
+
+@router.post("/release_estop")
+def release_estop():
+    """HMI 비상정지 해제 -> safe stop reset + servo on 요청."""
+    if not ros_bridge._bridge:
+        return {"success": False, "estop": False, "message": "ROS 브릿지 미연결"}
+    return ros_bridge._bridge.release_estop()

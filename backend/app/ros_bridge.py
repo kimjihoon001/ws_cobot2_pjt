@@ -11,22 +11,31 @@ A_2 프로젝트(~/ws_cobot_pjt_pj/A_2/backend/main.py)의 BridgeNode/_ros_spin/
 import asyncio
 import json
 import logging
+import math
 import threading
 import time
 from datetime import datetime, timezone
 
 import rclpy
+from rclpy.action import get_action_names_and_types
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import ReentrantCallbackGroup
+from action_msgs.srv import CancelGoal
+from controller_manager_msgs.srv import SwitchController
+from moveit_msgs.msg import DisplayTrajectory
+from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
+from dsr_msgs2.srv import GetRobotState, MoveStop, ServoOff, SetRobotControl
 from od_msg.srv import ConfirmTools
+from onrobot_rg_msgs.msg import OnRobotRGInput
 
 from .database import SessionLocal
 from .models import VoiceConfirmRequest
 
 log = logging.getLogger("ros_bridge")
+ESTOP_STATES = {3, 5, 6, 10}  # SAFE_OFF, SAFE_STOP, EMERGENCY_STOP, SAFE_OFF2
 
 _clients: set = set()                     # 지금 연결된 웹소켓들
 _loop: asyncio.AbstractEventLoop = None    # ROS2 스레드에서 웹소켓으로 보낼 때 필요한 asyncio 루프
@@ -48,6 +57,15 @@ class VoiceBridgeNode(Node):
         self._pending = None          # confirm_tools 대기 슬롯 (한 번에 하나만 가능)
         self._pending_release = None  # confirm_release 대기 슬롯 (한 번에 하나만 가능)
         self._jenga_inspection_running = False
+        self._estop_active = False
+        self._estop_releasing = False
+        self._estop_message = ""
+        self._state_poll_in_flight = False
+        self._joint_positions: dict[str, float] = {}
+        self._joint_units: dict[str, str] = {f"joint_{i}": "deg" for i in range(1, 7)}
+        self._joint_units["gripper"] = "mm"
+        self._last_joint_state_at = 0.0
+        self._last_gripper_state_at = 0.0
 
         # confirm_tools/confirm_release 콜백은 각각 최대 60초 threading.Event().wait()로
         # 블로킹된다. 실행기가 SingleThreadedExecutor면 그동안 다른 콜백(다른 쪽 확인 요청,
@@ -63,14 +81,104 @@ class VoiceBridgeNode(Node):
         # tool_pick_yolo_target.py가 집어가게 한다 (get_keyword를 부르는 주체는 여기 하나뿐).
         self._get_keyword_cli = self.create_client(Trigger, "get_keyword", callback_group=cb_group)
         self._jenga_inspection_cli = self.create_client(Trigger, "/run_jenga_inspection", callback_group=cb_group)
+        self._move_action_cancel_cli = self.create_client(
+            CancelGoal, "/move_action/_action/cancel_goal", callback_group=cb_group
+        )
+        self._execute_trajectory_cancel_cli = self.create_client(
+            CancelGoal, "/execute_trajectory/_action/cancel_goal", callback_group=cb_group
+        )
+        self._controller_trajectory_cancel_clients = []
+        for service_name in (
+            "/dsr01/dsr_moveit_controller/follow_joint_trajectory/_action/cancel_goal",
+            "/dsr_moveit_controller/follow_joint_trajectory/_action/cancel_goal",
+        ):
+            self._controller_trajectory_cancel_clients.append(
+                (
+                    service_name,
+                    self.create_client(CancelGoal, service_name, callback_group=cb_group),
+                )
+            )
+        self._switch_controller_cli = self.create_client(
+            SwitchController, "/dsr01/controller_manager/switch_controller", callback_group=cb_group
+        )
+        self._move_stop_cli = self.create_client(MoveStop, "/dsr01/motion/move_stop", callback_group=cb_group)
+        self._servo_off_cli = self.create_client(ServoOff, "/dsr01/system/servo_off", callback_group=cb_group)
+        self._set_control_cli = self.create_client(
+            SetRobotControl, "/dsr01/system/set_robot_control", callback_group=cb_group
+        )
+        self._get_robot_state_cli = self.create_client(
+            GetRobotState, "/dsr01/system/get_robot_state", callback_group=cb_group
+        )
         self._pick_task_pub = self.create_publisher(String, "pick_task_tools", 10)
+        self._hmi_stop_pub = self.create_publisher(String, "hmi/emergency_stop", 10)
+        self._display_trajectory_pub = self.create_publisher(DisplayTrajectory, "/display_planned_path", 10)
+        for topic in ("/joint_states", "/dsr01/joint_states", "/dsr01/gz/joint_states", "/gripper_joint_states"):
+            self.create_subscription(JointState, topic, self._handle_joint_state, 10, callback_group=cb_group)
+        self.create_subscription(OnRobotRGInput, "/OnRobotRGInput", self._handle_gripper_status, 10, callback_group=cb_group)
+        self.create_timer(0.5, self._poll_robot_state, callback_group=cb_group)
         self._hmi_get_keyword_in_flight = False
         self._last_pick_task_data = ""
         self._last_pick_task_at = 0.0
         self.get_logger().info("VoiceBridgeNode 준비 완료 (confirm_tools/confirm_release 서비스 대기 중)")
 
+    def _handle_joint_state(self, msg: JointState):
+        now = time.monotonic()
+        for name, position in zip(msg.name, msg.position):
+            if not math.isfinite(position):
+                continue
+            if name in {f"joint_{i}" for i in range(1, 7)}:
+                self._joint_positions[name] = round(math.degrees(position), 2)
+                self._joint_units[name] = "deg"
+                self._last_joint_state_at = now
+            elif name in {"finger_joint", "rg2_finger_joint", "gripper", "gripper_joint"}:
+                self._joint_positions["gripper"] = round(self._rg2_joint_to_width_mm(position), 1)
+                self._joint_units["gripper"] = "mm"
+                self._last_gripper_state_at = now
+
+    def _handle_gripper_status(self, msg: OnRobotRGInput):
+        self._joint_positions["gripper"] = round(float(msg.gwdf) / 10.0, 1)
+        self._joint_units["gripper"] = "mm"
+        self._last_gripper_state_at = time.monotonic()
+
+    def _poll_robot_state(self):
+        if self._estop_releasing or self._state_poll_in_flight:
+            return
+        if not self._get_robot_state_cli.service_is_ready():
+            return
+        self._state_poll_in_flight = True
+        future = self._get_robot_state_cli.call_async(GetRobotState.Request())
+        future.add_done_callback(self._on_robot_state)
+
+    def _on_robot_state(self, future):
+        try:
+            result = future.result()
+            if result is None:
+                return
+            if result.robot_state in ESTOP_STATES and not self._estop_active:
+                self._estop_active = True
+                self._estop_message = f"외부 비상정지 감지 (robot_state={result.robot_state})"
+                self._jenga_inspection_running = False
+                self._hmi_get_keyword_in_flight = False
+                self.get_logger().warning(self._estop_message)
+        except Exception as e:
+            self.get_logger().warning(f"로봇 상태 폴링 실패: {e}")
+        finally:
+            self._state_poll_in_flight = False
+
+    @staticmethod
+    def _rg2_joint_to_width_mm(joint_angle: float) -> float:
+        l1 = 0.108505
+        l3 = 0.055
+        theta1 = 1.41371
+        theta3 = 0.76794
+        dy = -0.0144
+        width_m = (math.cos(joint_angle + theta3) * l3 + dy + l1 * math.cos(theta1)) * 2
+        return max(0.0, min(110.0, width_m * 1000.0))
+
     def start_listening(self) -> bool:
         """HMI '음성 시작' 버튼. get_keyword 서비스가 안 떠 있으면 False."""
+        if self._estop_active:
+            return False
         if not self._get_keyword_cli.service_is_ready():
             return False
         self._hmi_get_keyword_in_flight = True
@@ -80,6 +188,8 @@ class VoiceBridgeNode(Node):
 
     def start_jenga_inspection(self) -> bool:
         """HMI 직접 실행 버튼. 음성 명령 없이 젠가 품질검사를 시작한다."""
+        if self._estop_active:
+            return False
         if not self._jenga_inspection_cli.service_is_ready():
             return False
         self._jenga_inspection_running = True
@@ -90,8 +200,178 @@ class VoiceBridgeNode(Node):
 
     def deliver_hammer_screwdriver(self) -> bool:
         """HMI 직접 실행 버튼. 음성 명령 없이 hammer/screwdriver 전달 작업을 시작한다."""
+        if self._estop_active:
+            return False
         self._publish_pick_task_data("hammer:user screwdriver:user", "hmi_direct")
         return True
+
+    def _call_dsr_service(self, client, request, label: str, timeout: float = 2.0) -> dict:
+        if not client.wait_for_service(timeout_sec=timeout):
+            message = f"{label} 서비스 응답 없음"
+            self.get_logger().warning(message)
+            return {"success": False, "message": message}
+
+        done = threading.Event()
+        result_box = {"result": None, "error": None}
+        future = client.call_async(request)
+
+        def _done_callback(done_future):
+            try:
+                result_box["result"] = done_future.result()
+            except Exception as exc:
+                result_box["error"] = exc
+            finally:
+                done.set()
+
+        future.add_done_callback(_done_callback)
+        if not done.wait(timeout=timeout):
+            message = f"{label} 응답 타임아웃"
+            self.get_logger().warning(message)
+            return {"success": False, "message": message}
+        if result_box["error"] is not None:
+            message = f"{label} 호출 실패: {result_box['error']}"
+            self.get_logger().error(message)
+            return {"success": False, "message": message}
+
+        result = result_box["result"]
+        success = bool(getattr(result, "success", True))
+        message = getattr(result, "message", label)
+        return {"success": success, "message": str(message), "response": result}
+
+    @staticmethod
+    def _public_service_result(result: dict) -> dict:
+        return {"success": result["success"], "message": result["message"]}
+
+    def emergency_stop(self) -> dict:
+        """HMI 긴급정지. MoveIt 목표 취소, 작업 노드 중단 신호, controller 정지를 요청한다."""
+        self._jenga_inspection_running = False
+        self._hmi_get_keyword_in_flight = False
+        self._estop_active = True
+        self._estop_message = "HMI 긴급정지 활성화"
+        self.get_logger().warning("HMI 긴급정지 요청 수신")
+
+        stop_msg = String()
+        stop_msg.data = "stop"
+        for _ in range(3):
+            self._hmi_stop_pub.publish(stop_msg)
+
+        action_cancel = self._cancel_motion_goals()
+        self._clear_displayed_trajectory()
+        controller_stop = self._switch_moveit_controller(active=False)
+
+        return {
+            "success": True,
+            "estop": self._estop_active,
+            "message": "HMI 긴급정지 활성화",
+            "details": {
+                "action_cancel": action_cancel,
+                "controller_stop": controller_stop,
+            },
+        }
+
+    def release_estop(self) -> dict:
+        """HMI 긴급정지 해제. MoveIt controller를 다시 활성화하고 작업 노드 중단을 해제한다."""
+        self._estop_releasing = True
+        self._estop_message = "HMI 긴급정지 해제 중"
+        self.get_logger().info("HMI 긴급정지 해제 요청 수신")
+        try:
+            action_cancel = self._cancel_motion_goals()
+            self._clear_displayed_trajectory()
+            controller_start = self._switch_moveit_controller(active=True)
+
+            release_msg = String()
+            release_msg.data = "release"
+            for _ in range(3):
+                self._hmi_stop_pub.publish(release_msg)
+
+            self._estop_active = False
+            self._estop_message = "HMI 긴급정지 해제 완료"
+
+            return {
+                "success": True,
+                "estop": self._estop_active,
+                "message": self._estop_message,
+                "details": {
+                    "action_cancel": action_cancel,
+                    "controller_start": controller_start,
+                },
+            }
+        finally:
+            self._estop_releasing = False
+
+    def _cancel_action_goals(self, client, label: str, timeout: float = 1.0) -> dict:
+        req = CancelGoal.Request()
+        if not client.wait_for_service(timeout_sec=timeout):
+            return {"success": False, "message": f"{label} 서비스 없음"}
+        result = self._call_dsr_service(client, req, label, timeout=timeout)
+        response = result.get("response")
+        return {
+            "success": result["success"],
+            "message": f"return_code={getattr(response, 'return_code', 'unknown')}",
+        }
+
+    def _cancel_motion_goals(self) -> dict:
+        results = {
+            "move_action": self._cancel_action_goals(self._move_action_cancel_cli, "move_action cancel"),
+            "execute_trajectory": self._cancel_action_goals(
+                self._execute_trajectory_cancel_cli,
+                "execute_trajectory cancel",
+            ),
+            "controller_trajectory": self._cancel_controller_trajectory_goals(),
+        }
+        # CancelGoal is best-effort; repeat once so a goal accepted during the first cancel window is caught.
+        time.sleep(0.05)
+        results["execute_trajectory_retry"] = self._cancel_action_goals(
+            self._execute_trajectory_cancel_cli,
+            "execute_trajectory cancel retry",
+            timeout=0.5,
+        )
+        return results
+
+    def _cancel_controller_trajectory_goals(self) -> list[dict]:
+        results = []
+        for service_name, client in self._controller_trajectory_cancel_clients:
+            results.append(self._cancel_action_goals(client, service_name, timeout=0.2))
+        return results
+
+    def _clear_displayed_trajectory(self):
+        empty_display = DisplayTrajectory()
+        for _ in range(3):
+            self._display_trajectory_pub.publish(empty_display)
+
+    def _switch_moveit_controller(self, active: bool, timeout: float = 0.5) -> dict:
+        req = SwitchController.Request()
+        controller_name = "dsr_moveit_controller"
+        req.activate_controllers = [controller_name] if active else []
+        req.deactivate_controllers = [] if active else [controller_name]
+        req.strictness = SwitchController.Request.BEST_EFFORT
+        req.activate_asap = True
+        req.timeout.sec = 1
+        if not self._switch_controller_cli.wait_for_service(timeout_sec=timeout):
+            return {"success": False, "message": "controller_manager switch_controller 서비스 없음"}
+        result = self._call_dsr_service(
+            self._switch_controller_cli,
+            req,
+            "controller_start" if active else "controller_stop",
+            timeout=1.0,
+        )
+        response = result.get("response")
+        ok = bool(getattr(response, "ok", False))
+        return {"success": ok, "message": "ok" if ok else result["message"]}
+
+    def _wait_until_not_estop(self, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            req = GetRobotState.Request()
+            result = self._call_dsr_service(self._get_robot_state_cli, req, "get_robot_state", timeout=1.0)
+            response = result.get("response")
+            if response is not None and getattr(response, "robot_state", None) not in ESTOP_STATES:
+                return True
+            if not result["success"]:
+                time.sleep(0.2)
+                continue
+            time.sleep(0.2)
+        return False
 
     def _publish_pick_task(self, tools, targets, source: str):
         data = " ".join(f"{tool}:{target}" for tool, target in zip(tools, targets))
@@ -265,25 +545,40 @@ class VoiceBridgeNode(Node):
     def get_robot_status(self) -> dict:
         service_names = set()
         action_names = set()
+        topic_names = set()
         try:
             service_names = {name for name, _ in self.get_service_names_and_types()}
-            action_names = {name for name, _ in self.get_action_names_and_types()}
+            action_names = {name for name, _ in get_action_names_and_types(self)}
+            topic_names = {name for name, _ in self.get_topic_names_and_types()}
         except Exception as e:
             self.get_logger().warn(f"로봇 상태 조회 실패: {e}")
 
+        moveit_available = (
+            "/move_action" in action_names
+            or "/move_action/_action/status" in topic_names
+            or "/move_action/_action/send_goal" in service_names
+        )
         checks = {
             "dsr": "/dsr01/system/get_robot_state" in service_names,
-            "moveit": "/move_action" in action_names,
+            "moveit": moveit_available,
             "jenga_inspector": "/run_jenga_inspection" in service_names,
             "tool_pick": self.count_subscribers("pick_task_tools") > 0,
             "voice": "get_keyword" in service_names or "/get_keyword" in service_names,
             "hand": "/get_hand_position" in service_names,
         }
+        if time.monotonic() - self._last_joint_state_at < 5.0:
+            checks["dsr"] = True
         connected = checks["dsr"] and checks["moveit"]
 
         current_task = "대기"
         task_key = "idle"
-        if self._jenga_inspection_running:
+        if self._estop_releasing:
+            current_task = "비상정지 해제 중"
+            task_key = "estop_releasing"
+        elif self._estop_active:
+            current_task = "비상정지"
+            task_key = "estop"
+        elif self._jenga_inspection_running:
             current_task = "품질검사 진행 중"
             task_key = "qc_running"
         elif self._pending:
@@ -306,6 +601,10 @@ class VoiceBridgeNode(Node):
             "current_task": current_task,
             "task_key": task_key,
             "checks": checks,
+            "estop": self._estop_active,
+            "estop_message": self._estop_message,
+            "joints": {name: self._joint_positions.get(name) for name in [*(f"joint_{i}" for i in range(1, 7)), "gripper"]},
+            "joint_units": dict(self._joint_units),
             "last_pick_task": self._last_pick_task_data,
             "ros_bridge": True,
         }
