@@ -67,6 +67,9 @@ export function InventoryPage({ canManage }: { canManage: boolean }) {
 
   useEffect(() => {
     refresh()
+    // 외부 재고 변동(로봇 소모 등)도 반영되도록 주기적 갱신
+    const interval = setInterval(refresh, 5000)
+    return () => clearInterval(interval)
   }, [refresh])
 
   useEffect(() => {
