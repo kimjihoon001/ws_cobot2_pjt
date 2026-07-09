@@ -1563,14 +1563,17 @@ class JengaInspectorNode(Node):
 
                 if push_aborted:
                     if attempt < max_push_attempts - 1:
-                        self.get_logger().warn("밀기 작업 취소됨. 안전을 위해 즉시 홈(JReady)으로 후퇴합니다.")
+                        self.get_logger().warn("밀기 작업 취소됨. 안전을 위해 즉시 회피 위치([0, 0, 90, 0, 90, 0])로 후퇴합니다.")
                         
-                        # 손이 있어도 무조건 안전한 뒤쪽(홈)으로 후퇴하도록 강제
+                        # 지정된 회피 위치 조인트 각도
+                        ESCAPE_JOINTS_DEG = [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]
+                        
+                        # 손이 있어도 무조건 안전한 뒤쪽(회피 위치)으로 후퇴하도록 강제
                         self.in_evasion = True
-                        self.move_to_joints_moveit(JReady)
+                        self.move_to_joints_moveit(ESCAPE_JOINTS_DEG)
                         self.in_evasion = False
 
-                        self.get_logger().warn("홈으로 후퇴 완료. 2초간 안전 대기 후 다시 밀기를 시도합니다.")
+                        self.get_logger().warn("회피 위치로 후퇴 완료. 2초간 안전 대기 후 다시 밀기를 시도합니다.")
                         time.sleep(2.0)
 
                         self.get_logger().warn(f"안전 확보됨. 다시 밀기를 시도합니다... (남은 재시도: {max_push_attempts - attempt - 1})")
