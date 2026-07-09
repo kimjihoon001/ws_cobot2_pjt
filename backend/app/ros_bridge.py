@@ -61,6 +61,7 @@ class VoiceBridgeNode(Node):
         # 켠다. 응답이 오면 확정된 도구 목록을 /pick_task_tools 토픽으로 발행해서
         # tool_pick_yolo_target.py가 집어가게 한다 (get_keyword를 부르는 주체는 여기 하나뿐).
         self._get_keyword_cli = self.create_client(Trigger, "get_keyword", callback_group=cb_group)
+        self._jenga_inspection_cli = self.create_client(Trigger, "/run_jenga_inspection", callback_group=cb_group)
         self._pick_task_pub = self.create_publisher(String, "pick_task_tools", 10)
         self._hmi_get_keyword_in_flight = False
         self._last_pick_task_data = ""
@@ -74,6 +75,20 @@ class VoiceBridgeNode(Node):
         self._hmi_get_keyword_in_flight = True
         future = self._get_keyword_cli.call_async(Trigger.Request())
         future.add_done_callback(self._on_get_keyword_done)
+        return True
+
+    def start_jenga_inspection(self) -> bool:
+        """HMI 직접 실행 버튼. 음성 명령 없이 젠가 품질검사를 시작한다."""
+        if not self._jenga_inspection_cli.service_is_ready():
+            return False
+        future = self._jenga_inspection_cli.call_async(Trigger.Request())
+        future.add_done_callback(self._on_jenga_inspection_done)
+        self.get_logger().info("HMI 직접 실행으로 젠가 품질 검사를 시작했습니다.")
+        return True
+
+    def deliver_hammer_screwdriver(self) -> bool:
+        """HMI 직접 실행 버튼. 음성 명령 없이 hammer/screwdriver 전달 작업을 시작한다."""
+        self._publish_pick_task_data("hammer:user screwdriver:user", "hmi_direct")
         return True
 
     def _publish_pick_task(self, tools, targets, source: str):
@@ -106,6 +121,20 @@ class VoiceBridgeNode(Node):
         self.get_logger().info(f"get_keyword 응답 수신: {result.message!r}")
         self._publish_pick_task_data(result.message, "get_keyword_done")
         self._hmi_get_keyword_in_flight = False
+
+    def _on_jenga_inspection_done(self, future):
+        try:
+            result = future.result()
+        except Exception as e:
+            self.get_logger().error(f"run_jenga_inspection 호출 실패: {e}")
+            return
+        if result is None:
+            self.get_logger().error("run_jenga_inspection 응답 없음")
+            return
+        if result.success:
+            self.get_logger().info(f"run_jenga_inspection 완료: {result.message}")
+        else:
+            self.get_logger().error(f"run_jenga_inspection 실패: {result.message}")
 
     def _start_pending(self, kind: str, tools, targets) -> dict:
         """DB에 pending row 생성 + 화면에 띄울 payload 구성."""
