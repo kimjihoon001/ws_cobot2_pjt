@@ -1527,7 +1527,7 @@ class JengaInspectorNode(Node):
                         break
                     if target_result == "abort":
                         self.get_logger().error(
-                            "밀기 목표 자세 이동 중 손 감지됨 - 안전을 위해 작업을 전면 취소하고 그리퍼를 연 뒤 복귀합니다."
+                            "밀기 목표 자세 이동 중 손 감지됨 - 미는 모션을 즉시 취소하고 그리퍼를 엽니다."
                         )
                         try:
                             self.gripper.open_gripper()
@@ -1550,9 +1550,30 @@ class JengaInspectorNode(Node):
 
                 if push_aborted:
                     if attempt < max_push_attempts - 1:
-                        self.get_logger().warn(f"밀기 작업 취소됨. 홈으로 복귀하여 안전을 확보한 후 재시도합니다... (남은 재시도: {max_push_attempts - attempt - 1})")
-                        self.move_to_joints_moveit(JReady)
-                        time.sleep(2.0)
+                        self.get_logger().warn("밀기 작업 취소됨. 즉시 밀기 접근 자세(대기 위치)로 후퇴합니다.")
+                        
+                        # 손이 있어도 무조건 안전한 뒤쪽(접근 자세)으로 후퇴하도록 강제
+                        self.in_evasion = True
+                        self.move_to_joints_moveit(PUSH_APPROACH_JOINTS_DEG)
+                        self.in_evasion = False
+
+                        self.get_logger().warn("후퇴 완료. 손이 완전히 치워질 때까지 제자리에서 안전 대기합니다.")
+                        
+                        # 손이 완전히(연속 2초 이상) 감지되지 않을 때까지 대기
+                        clear_count = 0
+                        while rclpy.ok():
+                            if self.hand_detected or self.push_hand_seen:
+                                clear_count = 0
+                                self.push_hand_seen = False
+                            else:
+                                clear_count += 1
+                                
+                            if clear_count >= 20:  # 0.1초 * 20 = 2초
+                                break
+                            time.sleep(0.1)
+
+                        self.get_logger().warn(f"안전 확보됨. 다시 밀기를 시도합니다... (남은 재시도: {max_push_attempts - attempt - 1})")
+                        time.sleep(1.0)
                     else:
                         self.get_logger().error("밀기 재시도 횟수를 초과하여 불량품 배출을 포기합니다.")
                 else:
