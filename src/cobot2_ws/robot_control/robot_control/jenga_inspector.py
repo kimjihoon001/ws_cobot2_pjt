@@ -1361,6 +1361,8 @@ class JengaInspectorNode(Node):
 
         # 6. Return back to Home position with safety evasion checks
         self.get_logger().info("Inspection complete. Returning to Home...")
+        home_retries = 0
+        MAX_HOME_RETRIES = 5
         while rclpy.ok():
             if self.move_to_joints_moveit(JReady):
                 break
@@ -1369,7 +1371,16 @@ class JengaInspectorNode(Node):
                 while rclpy.ok() and self.hand_detected:
                     time.sleep(0.5)
             else:
-                break
+                # 손 감지가 아닌 사유(계획 실패 등)로 홈 복귀에 실패해도 바로 포기하지 않고
+                # 재시도한다. 도달 불가한 자세에서 무한 대기하는 것을 막기 위해 횟수는 제한한다.
+                home_retries += 1
+                if home_retries >= MAX_HOME_RETRIES:
+                    self.get_logger().error(
+                        f"홈 복귀 {MAX_HOME_RETRIES}회 실패 - 홈 복귀를 포기합니다.")
+                    break
+                self.get_logger().warn(
+                    f"홈 복귀 실패(손 감지 외 사유) - 재시도 {home_retries}/{MAX_HOME_RETRIES}...")
+                time.sleep(1.0)
 
         # Cleanup obstacles
         self.clear_hand_obstacle()
