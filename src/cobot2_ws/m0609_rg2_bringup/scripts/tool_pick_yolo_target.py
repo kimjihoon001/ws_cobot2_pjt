@@ -93,7 +93,7 @@ GRASP_POINT_WEIGHTS_BY_CLASS = {
 }
 YAW_REFINE_ENABLED_BY_CLASS = {
     'tool-hammer': False,
-    'screw2': True,
+    'screw2': False,
 }
 CARTESIAN_MAX_STEP = 0.01      # pregrasp -> grasp 하강 Cartesian Path 보간 간격 (m)
 
