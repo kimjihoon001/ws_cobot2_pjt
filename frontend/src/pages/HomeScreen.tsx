@@ -19,8 +19,18 @@ export function HomeScreen({
   const [qcSummary, setQcSummary] = useState<QcSummary | null>(null)
 
   useEffect(() => {
-    resourcesApi.getSummary().then(setInvSummary).catch(() => setInvSummary(null))
-    qcApi.getQcSummary().then(setQcSummary).catch(() => setQcSummary(null))
+    const refresh = () => {
+      resourcesApi.getSummary().then(setInvSummary).catch(() => setInvSummary(null))
+      qcApi.getQcSummary().then(setQcSummary).catch(() => setQcSummary(null))
+    }
+    refresh()
+    // 홈에 머무는 동안에도 백엔드 재고/QC 변동이 반영되도록 주기적 갱신 + 창 포커스 시 갱신
+    const timer = setInterval(refresh, 5000)
+    window.addEventListener('focus', refresh)
+    return () => {
+      clearInterval(timer)
+      window.removeEventListener('focus', refresh)
+    }
   }, [])
 
   return (

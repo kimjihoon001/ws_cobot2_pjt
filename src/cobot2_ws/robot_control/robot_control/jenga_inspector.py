@@ -959,10 +959,13 @@ class JengaInspectorNode(Node):
         self.get_logger().info("Planning scene update published.")
 
     def save_home_top_image(self):
-        """홈(JReady)에서 top을 찍을 때 현재 카메라 프레임을 사진으로 남긴다."""
+        """홈(JReady)에서 top을 찍을 때 YOLO 검출 결과를 그려 사진으로 남긴다."""
         if self.latest_image is None:
             self.get_logger().warn("홈 top 사진 저장 실패 - 카메라 프레임이 아직 없습니다.")
             return
+        # YOLO 검출 결과를 프레임에 그려서 저장 (검출 없으면 원본 프레임)
+        results = self.model(self.latest_image.copy(), conf=0.60, verbose=False)
+        frame_to_save = results[0].plot() if len(results) > 0 else self.latest_image
         possible_paths = [
             os.path.expanduser("~/ws_cobot2_pjt/backend"),
             os.path.expanduser("~/cobot_ws/src/ws_cobot2_pjt/backend"),
@@ -976,7 +979,7 @@ class JengaInspectorNode(Node):
         os.makedirs(save_dir, exist_ok=True)
         timestamp = int(time.time() * 1000)
         filename = os.path.join(save_dir, f"inspection_home_top_{timestamp}.jpg")
-        if cv2.imwrite(filename, self.latest_image):
+        if cv2.imwrite(filename, frame_to_save):
             self.get_logger().info(f"홈 top 사진 저장 완료: {filename}")
         else:
             self.get_logger().error(f"홈 top 사진 저장 실패: {filename}")
