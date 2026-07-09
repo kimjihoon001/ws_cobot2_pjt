@@ -94,6 +94,11 @@ CONVEYOR_MOVE_TO_INSPECTION_STEPS = -7700
 CONVEYOR_MOVE_TO_INSPECTION_WAIT_SEC = 28.0    # 실측 26.94초 + 여유
 CONVEYOR_MOVE_TO_PASS_STEPS = -2300
 
+# 불합격 시 젠가 블록을 밀어내는 동작 (moveit_joint_line_demo.py의 두 자세, 단위: deg)
+# PUSH_APPROACH_JOINTS_DEG로 접근한 뒤 PUSH_TARGET_JOINTS_DEG로 이동하며 민다.
+PUSH_APPROACH_JOINTS_DEG = [-39.51, -21.94, 115.68, -0.33, 85.92, -39.27]
+PUSH_TARGET_JOINTS_DEG = [-67.14, 10.59, 87.35, -0.11, 81.50, -66.79]
+
 
 class JengaInspectorNode(Node):
     def __init__(self):
@@ -1259,6 +1264,14 @@ class JengaInspectorNode(Node):
                 f"검사 합격 - 컨베이어를 마저 이동합니다 (MOVE:{CONVEYOR_MOVE_TO_PASS_STEPS})"
             )
             self.conveyor.move(CONVEYOR_MOVE_TO_PASS_STEPS)
+
+        # 불합격이면 바로 젠가 블록을 밀어낸다 (접근 자세 → 미는 자세)
+        if not is_pass:
+            self.get_logger().info("검사 불합격 - 젠가 블록을 밀어냅니다...")
+            if self.move_to_joints_moveit(PUSH_APPROACH_JOINTS_DEG):
+                self.move_to_joints_moveit(PUSH_TARGET_JOINTS_DEG)
+            else:
+                self.get_logger().error("밀기 접근 자세 이동 실패 - 밀기 동작을 건너뜁니다.")
 
         # 6. Return back to Home position with safety evasion checks
         self.get_logger().info("Inspection complete. Returning to Home...")
