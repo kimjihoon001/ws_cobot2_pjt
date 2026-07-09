@@ -1286,8 +1286,29 @@ class JengaInspectorNode(Node):
         map_data_json = json.dumps(self.final_jenga_map) if hasattr(self, 'final_jenga_map') else None
         
         defect_loc = None
-        if not is_pass and len(failed_reasons) > 0:
-            defect_loc = failed_reasons[0]
+        if not is_pass:
+            if hasattr(self, 'final_jenga_map'):
+                missing_locations = []
+                for floor in range(1, 7):
+                    if floor not in self.final_jenga_map:
+                        continue
+                    blocks = self.final_jenga_map[floor]
+                    for idx, block in enumerate(blocks):
+                        if block == "X":
+                            if floor % 2 != 0:
+                                # 홀수층: 앞면(Front) 기준 (현재 DB맵은 뒷면 기준이므로 0과 2 좌우 반전)
+                                pos_str = "우측" if idx == 0 else "좌측" if idx == 2 else "중앙"
+                            else:
+                                # 짝수층: 오른쪽(Right) 기준 (DB맵과 시점 일치)
+                                pos_str = "좌측" if idx == 0 else "우측" if idx == 2 else "중앙"
+                            missing_locations.append(f"{floor}층 {pos_str}")
+                
+                if missing_locations:
+                    defect_loc = ", ".join(missing_locations) + " 누락"
+                else:
+                    defect_loc = failed_reasons[0]
+            else:
+                defect_loc = failed_reasons[0]
 
         # 백엔드 모델에 맞춰 DB에 저장 (정상 제품일 경우 몇형 제품인지 저장, 아닐 경우 불량품 표기)
         product_name_for_db = self.final_matched_product if is_pass else "알 수 없는 패턴 (불량품)"
