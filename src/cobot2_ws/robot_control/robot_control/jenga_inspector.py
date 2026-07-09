@@ -1460,6 +1460,35 @@ class JengaInspectorNode(Node):
         # 불합격이면 바로 젠가 블록을 밀어낸다 (접근 자세 → 미는 자세)
         if not is_pass:
             self.get_logger().info("검사 불합격 - 젠가 블록을 밀어냅니다...")
+            def check_hand_before_action(name):
+                if self.hand_detected or self.push_hand_seen:
+                    self.get_logger().error(f"손 감지됨 - {name} 전 안전을 위해 밀기 동작을 전면 취소(Abort)합니다.")
+                    return False
+                return True
+
+            def push_move_check_hand(target_joints, name):
+                scene_change_retry_count = 0
+                while rclpy.ok():
+                    if not check_hand_before_action(name):
+                        return "abort"
+                    if self.move_to_joints_moveit(target_joints):
+                        return "success"
+                    if self.hand_detected or self.last_moveit_error_code == 'HAND_DETECTED':
+                        self.get_logger().error(f"{name} 중 손 감지됨 - 안전을 위해 밀기 동작을 전면 취소(Abort)합니다.")
+                        return "abort"
+                    elif self.last_moveit_error_code == -3:
+                        self.request_doosan_quick_stop(f"{name} 중 MoveIt -3(scene 변화)")
+                        scene_change_retry_count += 1
+                        if scene_change_retry_count > 3:
+                            self.get_logger().error(f"{name} 중 MoveIt scene 변화 반복됨 - 밀기 건너뜀.")
+                            return "failed"
+                        self.get_logger().warn(f"{name} 중 MoveIt scene 변화 - 1초 대기 후 재시도 ({scene_change_retry_count}/3)...")
+                        time.sleep(1.0)
+                    else:
+                        self.get_logger().error(f"{name} 이동 실패 - 밀기 동작 건너뜀.")
+                        return "failed"
+                return "failed"
+
             max_push_attempts = 5
             for attempt in range(max_push_attempts):
                 self.in_push_sequence = True
