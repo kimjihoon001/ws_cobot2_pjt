@@ -21,7 +21,7 @@ except ImportError:
 
 from tf2_ros import Buffer, TransformListener
 from ament_index_python.packages import get_package_share_directory
-from std_srvs.srv import Trigger
+from std_srvs.srv import Trigger, Empty
 from od_msg.srv import SrvDepthPosition
 from robot_control.onrobot import RG
 
@@ -437,11 +437,12 @@ class JengaInspectorNode(Node):
         """Processes hand position, filters by robot workspace ROI, and updates obstacle."""
         is_clear_signal = msg.z < -1.0
         
-        # 타이트한 작업 공간 ROI 필터 (단위: 미터)
-        # X: 앞쪽 22cm ~ 55cm, Y: 좌우 -30cm ~ 30cm, Z: 높이 -2cm ~ 45cm
+        # 기존에 ROI가 좁아서 손이 경계에 있을 때 스크립트는 무시하고 MoveIt만 피해서 가는 문제 발생.
+        # 작업 공간 앞쪽 전체를 커버하도록 ROI를 대폭 확장합니다.
+        # X: 0cm ~ 80cm, Y: -60cm ~ 60cm, Z: -20cm ~ 80cm
         in_roi = False
         if not is_clear_signal:
-            in_roi = (0.22 <= msg.x <= 0.55) and (-0.30 <= msg.y <= 0.30) and (-0.02 <= msg.z <= 0.45)
+            in_roi = (0.0 <= msg.x <= 0.80) and (-0.60 <= msg.y <= 0.60) and (-0.20 <= msg.z <= 0.80)
             
         if is_clear_signal or not in_roi:
             if self.hand_detected:
@@ -470,6 +471,16 @@ class JengaInspectorNode(Node):
                             self.get_logger().error(f"밀기 중 MoveGroup goal 취소 요청 실패: {e}")
             else:
                 self.update_hand_obstacle(msg.x, msg.y, msg.z)
+
+    def call_clear_octomap(self):
+        """Clears MoveIt's Octomap to force straight planning without avoidance."""
+        client = self.create_client(Empty, '/clear_octomap')
+        if not client.wait_for_service(timeout_sec=0.5):
+            self.get_logger().warn('/clear_octomap service not available')
+            return
+        req = Empty.Request()
+        client.call_async(req)
+        self.get_logger().info('Cleared octomap to force straight planning.')
 
     def request_doosan_quick_stop(self, reason):
         """Requests a controller-level quick stop; MoveGroup cancel alone can lag behind execution."""
@@ -1471,19 +1482,21 @@ class JengaInspectorNode(Node):
                 while rclpy.ok():
                     if not check_hand_before_action(name):
                         return "abort"
+                    
+                    # 이동 직전에 Octomap을 비워서, 미리 손을 피하는 우회 경로를 생성하지 못하게 함
+                    self.call_clear_octomap()
+                    time.sleep(0.1)  # Clear 반영 대기
+                    
                     if self.move_to_joints_moveit(target_joints):
                         return "success"
+                    
                     if self.hand_detected or self.last_moveit_error_code == 'HAND_DETECTED':
                         self.get_logger().error(f"{name} 중 손 감지됨 - 안전을 위해 밀기 동작을 전면 취소(Abort)합니다.")
                         return "abort"
                     elif self.last_moveit_error_code == -3:
-                        self.request_doosan_quick_stop(f"{name} 중 MoveIt -3(scene 변화)")
-                        scene_change_retry_count += 1
-                        if scene_change_retry_count > 3:
-                            self.get_logger().error(f"{name} 중 MoveIt scene 변화 반복됨 - 밀기 건너뜀.")
-                            return "failed"
-                        self.get_logger().warn(f"{name} 중 MoveIt scene 변화 - 1초 대기 후 재시도 ({scene_change_retry_count}/3)...")
-                        time.sleep(1.0)
+                        # 궤적 생성 시점엔 Octomap이 비어있어 직선으로 출발했지만, 이동 중 손(장애물)이 나타난 경우
+                        self.get_logger().error(f"{name} 중 손에 의해 경로 막힘(MoveIt -3) - 밀기를 즉시 취소(Abort)합니다.")
+                        return "abort"
                     else:
                         self.get_logger().error(f"{name} 이동 실패 - 밀기 동작 건너뜀.")
                         return "failed"
@@ -1550,30 +1563,17 @@ class JengaInspectorNode(Node):
 
                 if push_aborted:
                     if attempt < max_push_attempts - 1:
-                        self.get_logger().warn("밀기 작업 취소됨. 즉시 밀기 접근 자세(대기 위치)로 후퇴합니다.")
+                        self.get_logger().warn("밀기 작업 취소됨. 안전을 위해 즉시 홈(JReady)으로 후퇴합니다.")
                         
-                        # 손이 있어도 무조건 안전한 뒤쪽(접근 자세)으로 후퇴하도록 강제
+                        # 손이 있어도 무조건 안전한 뒤쪽(홈)으로 후퇴하도록 강제
                         self.in_evasion = True
-                        self.move_to_joints_moveit(PUSH_APPROACH_JOINTS_DEG)
+                        self.move_to_joints_moveit(JReady)
                         self.in_evasion = False
 
-                        self.get_logger().warn("후퇴 완료. 손이 완전히 치워질 때까지 제자리에서 안전 대기합니다.")
-                        
-                        # 손이 완전히(연속 2초 이상) 감지되지 않을 때까지 대기
-                        clear_count = 0
-                        while rclpy.ok():
-                            if self.hand_detected or self.push_hand_seen:
-                                clear_count = 0
-                                self.push_hand_seen = False
-                            else:
-                                clear_count += 1
-                                
-                            if clear_count >= 20:  # 0.1초 * 20 = 2초
-                                break
-                            time.sleep(0.1)
+                        self.get_logger().warn("홈으로 후퇴 완료. 2초간 안전 대기 후 다시 밀기를 시도합니다.")
+                        time.sleep(2.0)
 
                         self.get_logger().warn(f"안전 확보됨. 다시 밀기를 시도합니다... (남은 재시도: {max_push_attempts - attempt - 1})")
-                        time.sleep(1.0)
                     else:
                         self.get_logger().error("밀기 재시도 횟수를 초과하여 불량품 배출을 포기합니다.")
                 else:
