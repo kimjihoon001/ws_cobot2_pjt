@@ -1,6 +1,9 @@
 import numpy as np
+import cv2
 import rclpy
 from rclpy.node import Node
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Optional, Tuple
 
 from ament_index_python.packages import get_package_share_directory
@@ -18,6 +21,7 @@ class ObjectHandNode(Node):
         super().__init__('object_hand_node')
         self.img_node = ImgNode()
         self.model = self._load_model(model_name)
+        self.hand_image_dir = self._resolve_hand_image_dir()
         self.intrinsics = self._wait_for_valid_data(
             self.img_node.get_camera_intrinsic, "camera intrinsics"
         )
@@ -27,6 +31,19 @@ class ObjectHandNode(Node):
             self.handle_get_depth
         )
         self.get_logger().info("ObjectHandNode initialized.")
+
+    def _resolve_hand_image_dir(self):
+        candidates = [
+            Path.home() / "ws_cobot2_pjt" / "backend" / "hand_images",
+            Path.cwd() / "backend" / "hand_images",
+        ]
+        for path in candidates:
+            if path.parent.exists():
+                path.mkdir(parents=True, exist_ok=True)
+                return path
+        path = candidates[0]
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     def _load_model(self, name):
         """모델 이름에 따라 인스턴스를 반환합니다."""
@@ -52,6 +69,7 @@ class ObjectHandNode(Node):
             return 0.0, 0.0, 0.0
         
         self.get_logger().info(f"Detection: box={box}, score={score}")
+        self._save_hand_detection_image(box, score)
         cx, cy = map(int, [(box[0] + box[2]) / 2, (box[1] + box[3]) / 2])
         cz = self._get_depth(cx, cy)
         if cz is None:
@@ -59,6 +77,41 @@ class ObjectHandNode(Node):
             return 0.0, 0.0, 0.0
 
         return self._pixel_to_camera_coords(cx, cy, cz)
+
+    def _save_hand_detection_image(self, box, score):
+        frame = getattr(self.model, "last_detection_frame", None)
+        if frame is None:
+            self.get_logger().warn("손 검출 이미지를 저장할 프레임이 없습니다.")
+            return
+
+        image = frame.copy()
+        h, w = image.shape[:2]
+        x1, y1, x2, y2 = [int(round(v)) for v in box]
+        x1 = max(0, min(w - 1, x1))
+        x2 = max(0, min(w - 1, x2))
+        y1 = max(0, min(h - 1, y1))
+        y2 = max(0, min(h - 1, y2))
+
+        cv2.rectangle(image, (x1, y1), (x2, y2), (0, 0, 255), 2)
+        label = f"hand {score:.2f}"
+        label_y = max(20, y1 - 8)
+        cv2.putText(
+            image,
+            label,
+            (x1, label_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (0, 0, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+        filename = self.hand_image_dir / f"hand_{timestamp}_{score:.2f}.jpg"
+        if cv2.imwrite(str(filename), image):
+            self.get_logger().info(f"손 검출 이미지 저장: {filename}")
+        else:
+            self.get_logger().warn(f"손 검출 이미지 저장 실패: {filename}")
 
     def _get_depth(self, x, y):
         """픽셀 좌표 주변의 유효한 최소 depth 값을 읽어옵니다 (배경 무시, 근접 무효영역 및 노이즈 필터링)."""

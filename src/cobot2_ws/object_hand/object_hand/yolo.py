@@ -26,6 +26,7 @@ import torch
 class YoloModel:
     def __init__(self):
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.last_detection_frame = None
 
         # Load hand model
         self.hand_model = YOLO(YOLO_MODEL_PATH)
@@ -59,7 +60,9 @@ class YoloModel:
         rclpy.spin_once(img_node)
         frames = self.get_frames(img_node, duration=0.1)
         if not frames:  # Check if frames are empty
+            self.last_detection_frame = None
             return None, None
+        self.last_detection_frame = frames[-1].copy()
 
         results = self.hand_model(frames, device=self.device, verbose=False)
         print("classes: ")
@@ -83,7 +86,7 @@ class YoloModel:
         best_det = max(matches, key=lambda x: x["score"])
         return best_det["box"], best_det["score"]
 
-    def _aggregate_detections(self, results, confidence_threshold=0.5, iou_threshold=0.5):
+    def _aggregate_detections(self, results, confidence_threshold=0.75, iou_threshold=0.5):
         """
         Fuse raw detection boxes across frames using IoU-based grouping
         and majority voting for robust final detections.

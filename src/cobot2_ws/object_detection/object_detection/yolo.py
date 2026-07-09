@@ -81,7 +81,8 @@ class YoloModel:
         results = model(frames, device=self.device, verbose=False)
         print("classes: ")
         print(results[0].names)
-        detections = self._aggregate_detections(results)
+        confidence_threshold = 0.75 if target == 'hand' else 0.5
+        detections = self._aggregate_detections(results, confidence_threshold=confidence_threshold)
         
         if target not in class_dict:
             print(f"Target '{target}' not in class dictionary.")
