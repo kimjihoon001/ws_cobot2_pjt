@@ -505,15 +505,23 @@ class PickYoloTarget(Node):
                 continue
 
             score, (x1, y1, x2, y2), idx, class_name = best
-            cx_px, cy_px = int((x1 + x2) / 2), int((y1 + y2) / 2)
-            depth_m = self._sample_depth(cx_px, cy_px)
-            if depth_m is None:
-                continue
 
             role = KEYPOINT_AXIS_ROLE[class_name]
             kpts_xy = results.keypoints.xy[idx].tolist()
             head_px = np.mean([kpts_xy[j] for j in role['head_idx']], axis=0)
             tail_px = np.array(kpts_xy[role['tail_idx']])
+
+            # 바운딩 박스 중심 대신 키포인트(머리-꼬리)의 중간점을 파지 목표점(Z 측정점)으로 사용
+            if (head_px[0] == 0 and head_px[1] == 0) or (tail_px[0] == 0 and tail_px[1] == 0):
+                # 키포인트가 제대로 잡히지 않은 경우 기존 바운딩 박스 중심으로 폴백
+                cx_px, cy_px = int((x1 + x2) / 2), int((y1 + y2) / 2)
+            else:
+                cx_px = int((head_px[0] + tail_px[0]) / 2)
+                cy_px = int((head_px[1] + tail_px[1]) / 2)
+
+            depth_m = self._sample_depth(cx_px, cy_px)
+            if depth_m is None:
+                continue
 
             self.get_logger().info(f'{class_name} 탐지 (conf={score:.2f}, depth={depth_m:.3f}m)')
             return cx_px, cy_px, depth_m, head_px, tail_px, class_name
