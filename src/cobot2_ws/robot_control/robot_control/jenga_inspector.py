@@ -43,6 +43,7 @@ from shape_msgs.msg import SolidPrimitive, Mesh, MeshTriangle
 from moveit_msgs.srv import GetPositionIK
 from moveit_msgs.msg import PositionIKRequest
 from geometry_msgs.msg import PoseStamped
+from dsr_msgs2.srv import MoveStop
 
 JOINT_NAMES = ['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6']
 
@@ -96,8 +97,10 @@ CONVEYOR_MOVE_TO_PASS_STEPS = -2300
 
 # 불합격 시 젠가 블록을 밀어내는 동작 (moveit_joint_line_demo.py의 두 자세, 단위: deg)
 # PUSH_APPROACH_JOINTS_DEG로 접근한 뒤 PUSH_TARGET_JOINTS_DEG로 이동하며 민다.
-PUSH_APPROACH_JOINTS_DEG = [-39.51, -21.94, 115.68, -0.33, 85.92, -39.27]
-PUSH_TARGET_JOINTS_DEG = [-67.14, 10.59, 87.35, -0.11, 81.50, -66.79]
+PUSH_APPROACH_JOINTS_DEG = [-39.51, -21.94, 115.68, -0.33, 85.92, 140.73]
+PUSH_TARGET_JOINTS_DEG = [-67.14, 10.59, 87.35, -0.11, 81.50, 113.21]
+DOOSAN_QUICK_STOP_MODE = 1  # DR_QSTOP: Quick stop without STO
+DOOSAN_MOVE_STOP_SERVICE = f'/{ROBOT_ID}/motion/move_stop'
 
 
 class JengaInspectorNode(Node):
@@ -174,6 +177,11 @@ class JengaInspectorNode(Node):
         self.action_node = rclpy.create_node("jenga_inspector_action_node")
         self.ikin_client = self.action_node.create_client(GetPositionIK, '/compute_ik')
         self._ac = ActionClient(self.action_node, MoveGroup, '/move_action')
+        self.move_stop_service_name = DOOSAN_MOVE_STOP_SERVICE
+        self.move_stop_client = self.action_node.create_client(
+            MoveStop,
+            self.move_stop_service_name
+        )
 
         # Clients for perception (created on action_node to bypass executor deadlock)
         self.get_position_client = self.action_node.create_client(
@@ -191,6 +199,12 @@ class JengaInspectorNode(Node):
         self.get_logger().info("Waiting for MoveGroup Action server...")
         self._ac.wait_for_server()
         self.get_logger().info("MoveGroup Action server connected.")
+        if self.move_stop_client.wait_for_service(timeout_sec=2.0):
+            self.get_logger().info(f"Doosan move_stop service connected: {self.move_stop_service_name}")
+        else:
+            self.get_logger().warn(
+                f"Doosan move_stop service not available yet: {self.move_stop_service_name}"
+            )
 
         # TF Listener to get current robot pose without blocking DSR services
         self.tf_buffer = Buffer()
@@ -211,6 +225,10 @@ class JengaInspectorNode(Node):
         self.current_hand_pos = None
         self.active_goal_handle = None
         self.in_evasion = False
+        self.in_push_sequence = False
+        self.push_hand_seen = False
+        self.push_cancel_requested = False
+        self.last_moveit_error_code = None
         self.last_log_time = 0.0
         
         # Subscribe to hand position topic with a ReentrantCallbackGroup to prevent service call deadlocks
@@ -438,7 +456,69 @@ class JengaInspectorNode(Node):
             if now - self.last_log_time > 1.0:
                 self.get_logger().info(f"Hand detected inside active ROI: x={msg.x:.3f}m, y={msg.y:.3f}m, z={msg.z:.3f}m")
                 self.last_log_time = now
-            self.update_hand_obstacle(msg.x, msg.y, msg.z)
+            if getattr(self, 'in_push_sequence', False):
+                self.push_hand_seen = True
+                if not self.push_cancel_requested:
+                    self.push_cancel_requested = True
+                    self.request_doosan_quick_stop("밀기 중 손 감지")
+                    goal_handle = self.active_goal_handle
+                    if goal_handle is not None:
+                        try:
+                            goal_handle.cancel_goal_async()
+                            self.get_logger().warn("밀기 중 손 감지 - 현재 MoveGroup goal 즉시 취소 요청.")
+                        except Exception as e:
+                            self.get_logger().error(f"밀기 중 MoveGroup goal 취소 요청 실패: {e}")
+            else:
+                self.update_hand_obstacle(msg.x, msg.y, msg.z)
+
+    def request_doosan_quick_stop(self, reason):
+        """Requests a controller-level quick stop; MoveGroup cancel alone can lag behind execution."""
+        if not self.ensure_move_stop_service_ready():
+            self.get_logger().error(
+                f"{reason} - Doosan quick stop 서비스가 준비되지 않아 로봇 정지 요청을 보내지 못했습니다."
+            )
+            return
+
+        req = MoveStop.Request()
+        req.stop_mode = DOOSAN_QUICK_STOP_MODE
+
+        try:
+            future = self.move_stop_client.call_async(req)
+            future.add_done_callback(self._on_doosan_quick_stop_done)
+            self.get_logger().warn(f"{reason} - Doosan quick stop 요청 전송.")
+        except Exception as e:
+            self.get_logger().error(f"{reason} - Doosan quick stop 요청 실패: {e}")
+
+    def ensure_move_stop_service_ready(self):
+        if self.move_stop_client.service_is_ready():
+            return True
+
+        if self.move_stop_client.wait_for_service(timeout_sec=0.5):
+            return True
+
+        try:
+            service_names = [name for name, _ in self.action_node.get_service_names_and_types()]
+            candidates = sorted(name for name in service_names if name.endswith('/motion/move_stop'))
+            if candidates and candidates[0] != self.move_stop_service_name:
+                self.move_stop_service_name = candidates[0]
+                self.move_stop_client = self.action_node.create_client(MoveStop, self.move_stop_service_name)
+                self.get_logger().warn(f"Doosan move_stop service 재연결 시도: {self.move_stop_service_name}")
+        except Exception as e:
+            self.get_logger().warn(f"Doosan move_stop service 검색 실패: {e}")
+
+        return self.move_stop_client.wait_for_service(timeout_sec=1.0)
+
+    def _on_doosan_quick_stop_done(self, future):
+        try:
+            result = future.result()
+        except Exception as e:
+            self.get_logger().error(f"Doosan quick stop 응답 실패: {e}")
+            return
+
+        if result and result.success:
+            self.get_logger().warn("Doosan quick stop 처리 완료.")
+        else:
+            self.get_logger().error("Doosan quick stop 처리 실패.")
 
     def update_hand_obstacle(self, x, y, z):
         """Spawns/Updates hand obstacle in the MoveIt planning scene."""
@@ -652,6 +732,12 @@ class JengaInspectorNode(Node):
     def move_to_joints_moveit(self, joint_positions_deg):
         """Plans and executes motion to the target joint positions (in degrees) using MoveGroup action.
         Aborts planning or execution if a hand is detected (unless in safety evasion mode)."""
+        self.last_moveit_error_code = None
+        hand_blocks_motion = lambda: self.hand_detected or (
+            getattr(self, 'in_push_sequence', False)
+            and (getattr(self, 'push_hand_seen', False) or getattr(self, 'push_cancel_requested', False))
+        )
+
         # Convert degrees to radians
         joint_positions_rad = [np.radians(angle) for angle in joint_positions_deg]
         
@@ -684,36 +770,58 @@ class JengaInspectorNode(Node):
         goal_msg.planning_options = opts
 
         # Check before sending goal (bypass check if in safety evasion mode)
-        if self.hand_detected and not getattr(self, 'in_evasion', False):
+        if hand_blocks_motion() and not getattr(self, 'in_evasion', False):
+            self.last_moveit_error_code = 'HAND_DETECTED'
             self.get_logger().warn('Hand detected before planning! Aborting motion.')
             return False
 
         self.get_logger().info('Sending MoveGroup Goal...')
         send_future = self._ac.send_goal_async(goal_msg)
+        cancel_after_accept = False
         
         while rclpy.ok() and not send_future.done():
-            if self.hand_detected and not getattr(self, 'in_evasion', False):
-                self.get_logger().warn('Hand detected during planning phase! Aborting motion.')
-                return False
+            if hand_blocks_motion() and not getattr(self, 'in_evasion', False):
+                self.last_moveit_error_code = 'HAND_DETECTED'
+                cancel_after_accept = True
+                self.get_logger().warn('Hand detected while sending goal! Cancelling as soon as MoveGroup accepts it.')
+                if getattr(self, 'in_push_sequence', False):
+                    self.request_doosan_quick_stop("밀기 goal 전송 중 손 감지")
+                break
             time.sleep(0.05)
+
+        while rclpy.ok() and not send_future.done():
+            time.sleep(0.01)
 
         goal_handle = send_future.result()
         if not goal_handle.accepted:
+            self.last_moveit_error_code = 'GOAL_REJECTED'
             self.get_logger().error('Motion planning request rejected by MoveGroup.')
             return False
 
         self.active_goal_handle = goal_handle
+
+        if cancel_after_accept:
+            cancel_future = goal_handle.cancel_goal_async()
+            while rclpy.ok() and not cancel_future.done():
+                time.sleep(0.01)
+            self.active_goal_handle = None
+            self.get_logger().info('Motion cancelled before execution due to hand detection.')
+            return False
+
         self.get_logger().info('Motion planning accepted. Executing...')
         result_future = goal_handle.get_result_async()
         
         aborted = False
         while rclpy.ok() and not result_future.done():
-            if self.hand_detected and not getattr(self, 'in_evasion', False):
+            if hand_blocks_motion() and not getattr(self, 'in_evasion', False):
                 self.get_logger().warn('Hand detected during execution phase! Cancelling current motion...')
+                if getattr(self, 'in_push_sequence', False):
+                    self.request_doosan_quick_stop("밀기 실행 중 손 감지")
                 cancel_future = goal_handle.cancel_goal_async()
                 while rclpy.ok() and not cancel_future.done():
                     time.sleep(0.01)
-                self.get_logger().info('Motion cancelled successfully.')
+                self.get_logger().info('MoveGroup cancel request completed. Waiting 1.0s for robot to settle...')
+                time.sleep(1.0)
                 aborted = True
                 break
             time.sleep(0.05)
@@ -721,9 +829,11 @@ class JengaInspectorNode(Node):
         self.active_goal_handle = None
         
         if aborted:
+            self.last_moveit_error_code = 'HAND_DETECTED'
             return False
 
         result = result_future.result().result
+        self.last_moveit_error_code = result.error_code.val
         if result.error_code.val == 1:
             self.get_logger().info('Successfully moved to target joint positions!')
             return True
@@ -1153,6 +1263,7 @@ class JengaInspectorNode(Node):
   
         # 3. Spawn STL mesh in RViz
         spawn_z = p_base[2] - 42.0
+        self.last_jenga_spawn_params = (p_base[0], p_base[1], spawn_z, yaw_base)
         self.spawn_jenga_mesh(p_base[0], p_base[1], spawn_z, yaw_base)
   
         # 4. Generate scanning viewpoints around the Jenga block using Spherical coordinates
@@ -1212,6 +1323,7 @@ class JengaInspectorNode(Node):
 
         # Iterate targets with safety loop
         target_idx = 0
+        scene_change_retry_counts = {}
         while target_idx < len(scan_targets):
             face_idx, face_name, pitch_deg, joint_angles = scan_targets[target_idx]
             self.current_pitch_deg = pitch_deg
@@ -1229,6 +1341,23 @@ class JengaInspectorNode(Node):
                         time.sleep(0.5)
                         
                     self.get_logger().info(f"Hand cleared. Resuming scan of {face_name} Face (retrying same position)...")
+                    continue
+                elif self.last_moveit_error_code == -3:
+                    scene_change_retry_counts[target_idx] = scene_change_retry_counts.get(target_idx, 0) + 1
+                    if scene_change_retry_counts[target_idx] > 3:
+                        self.get_logger().error(
+                            f"MoveIt scene changed repeatedly while moving to {face_name} Face. "
+                            "Skipping this scan position after 3 retries."
+                        )
+                        target_idx += 1
+                        continue
+
+                    self.get_logger().warn(
+                        f"MoveIt scene changed while moving to {face_name} Face. "
+                        f"Waiting briefly and retrying the same scan position "
+                        f"({scene_change_retry_counts[target_idx]}/3)..."
+                    )
+                    time.sleep(1.0)
                     continue
                 else:
                     self.get_logger().error(f"Failed to move to {face_name} Face due to non-safety reasons. Skipping.")
@@ -1331,23 +1460,86 @@ class JengaInspectorNode(Node):
         # 불합격이면 바로 젠가 블록을 밀어낸다 (접근 자세 → 미는 자세)
         if not is_pass:
             self.get_logger().info("검사 불합격 - 젠가 블록을 밀어냅니다...")
+            self.in_push_sequence = True
+            self.push_hand_seen = False
+            self.push_cancel_requested = False
+            self.clear_hand_obstacle()
+            time.sleep(0.3)
 
-            # 손이 감지되면 move_to_joints_moveit이 즉시 abort되므로, 손이 빠질 때까지
-            # 기다렸다가 재시도한다. 손 감지 외 사유로 실패하면 해당 이동만 건너뛴다.
-            def push_move_wait_for_hand(target_joints, name):
+            def wait_for_hand_clear_before_push(name):
+                clear_started_at = None
+
                 while rclpy.ok():
-                    if self.move_to_joints_moveit(target_joints):
-                        return True
-                    if self.hand_detected:
-                        self.get_logger().warn(f"손 감지됨 - 손이 빠질 때까지 대기 후 {name} 재시도...")
+                    if self.hand_detected or self.push_hand_seen:
+                        clear_started_at = None
+                        self.get_logger().warn(f"손 감지됨 - {name} 전 손이 빠질 때까지 대기합니다.")
+                        self.push_hand_seen = False
+                        self.push_cancel_requested = False
                         while rclpy.ok() and self.hand_detected:
                             time.sleep(0.5)
-                    else:
-                        self.get_logger().error(f"{name} 이동 실패(손 감지 외 사유) - 밀기 동작을 건너뜁니다.")
-                        return False
+                        continue
+
+                    if clear_started_at is None:
+                        clear_started_at = time.time()
+                        self.clear_hand_obstacle()
+
+                    if time.time() - clear_started_at >= 1.0:
+                        self.push_hand_seen = False
+                        self.push_cancel_requested = False
+                        self.get_logger().info(f"손 감지 해제 - {name}를 계속 진행합니다.")
+                        return True
+
+                    time.sleep(0.1)
+
                 return False
 
-            if push_move_wait_for_hand(PUSH_APPROACH_JOINTS_DEG, "밀기 접근 자세"):
+            # 불량품 밀기 중에는 안전위치로 우회 이동하지 않고, 손이 빠질 때까지
+            # 멈춰 기다린다. 밀기 목표 자세에서 손이 감지되면 밀기 접근 자세부터
+            # 다시 시작할 수 있도록 호출부에 HAND_DETECTED 상태를 알려준다.
+            def push_move_wait_for_hand(target_joints, name):
+                scene_change_retry_count = 0
+
+                while rclpy.ok():
+                    if not wait_for_hand_clear_before_push(name):
+                        return "failed"
+
+                    if self.move_to_joints_moveit(target_joints):
+                        return "success"
+
+                    if self.hand_detected or self.last_moveit_error_code == 'HAND_DETECTED':
+                        self.get_logger().warn(f"{name} 중 손 감지됨 - 정지 후 손이 빠지면 같은 단계 재시도...")
+                        return "hand_detected"
+                    elif self.last_moveit_error_code == -3:
+                        self.request_doosan_quick_stop(f"{name} 중 MoveIt -3(scene 변화)")
+                        scene_change_retry_count += 1
+                        if scene_change_retry_count > 3:
+                            self.get_logger().error(
+                                f"{name} 중 MoveIt scene 변화가 반복됨 - 3회 재시도 후 밀기 동작을 건너뜁니다."
+                            )
+                            return "failed"
+
+                        self.get_logger().warn(
+                            f"{name} 중 MoveIt scene 변화 감지됨 - 1초 대기 후 같은 밀기 자세 재시도 "
+                            f"({scene_change_retry_count}/3)..."
+                        )
+                        time.sleep(1.0)
+                    else:
+                        self.get_logger().error(f"{name} 이동 실패(손 감지 외 사유) - 밀기 동작을 건너뜁니다.")
+                        return "failed"
+                return "failed"
+
+            while rclpy.ok():
+                approach_result = push_move_wait_for_hand(PUSH_APPROACH_JOINTS_DEG, "밀기 접근 자세")
+                if approach_result == "hand_detected":
+                    self.get_logger().warn("밀기 접근 중 손 감지됨 - 손이 빠지면 밀기 접근 자세부터 다시 시도합니다.")
+                    continue
+                if approach_result != "success":
+                    break
+
+                if not wait_for_hand_clear_before_push("그리퍼 닫기"):
+                    self.get_logger().warn("그리퍼 닫기 전 대기 중 종료됨 - 밀기 동작을 중단합니다.")
+                    break
+
                 # 접근 자세까지는 젠가 메시를 장애물로 유지하고, 실제 밀기 동작 전 제거한다.
                 self.remove_jenga_mesh()
                 time.sleep(0.5)  # 씬 업데이트 반영 대기
@@ -1357,7 +1549,31 @@ class JengaInspectorNode(Node):
                     time.sleep(1.0)
                 except Exception as e:
                     self.get_logger().error(f"밀기 전 그리퍼 닫기 실패: {e}")
-                push_move_wait_for_hand(PUSH_TARGET_JOINTS_DEG, "밀기 목표 자세")
+
+                target_result = push_move_wait_for_hand(PUSH_TARGET_JOINTS_DEG, "밀기 목표 자세")
+                if target_result == "success":
+                    break
+                if target_result == "hand_detected":
+                    self.get_logger().warn(
+                        "밀기 목표 자세 이동 중 손 감지됨 - 안전을 위해 그리퍼를 열고 젠가 가상 씬을 복구한 뒤 밀기 접근 자세부터 다시 진행합니다."
+                    )
+                    try:
+                        self.gripper.open_gripper()
+                        time.sleep(1.0)
+                    except Exception as e:
+                        self.get_logger().error(f"복귀 전 그리퍼 열기 실패: {e}")
+                    
+                    if getattr(self, 'last_jenga_spawn_params', None) is not None:
+                        self.spawn_jenga_mesh(*self.last_jenga_spawn_params)
+                        time.sleep(0.5)
+                        
+                    continue
+                break
+
+            self.in_push_sequence = False
+            self.push_hand_seen = False
+            self.push_cancel_requested = False
+            self.clear_hand_obstacle()
 
         # 6. Return back to Home position with safety evasion checks
         self.get_logger().info("Inspection complete. Returning to Home...")
