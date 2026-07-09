@@ -18,6 +18,7 @@ install(
     scripts/gripper_virtual_node.py
     scripts/scene_builder.py
     scripts/hand_avoidance.py
+    scripts/moveit_joint_line_demo.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

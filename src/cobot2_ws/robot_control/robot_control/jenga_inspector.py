@@ -1307,10 +1307,16 @@ class JengaInspectorNode(Node):
         # 불합격이면 바로 젠가 블록을 밀어낸다 (접근 자세 → 미는 자세)
         if not is_pass:
             self.get_logger().info("검사 불합격 - 젠가 블록을 밀어냅니다...")
-            # 스폰한 젠가 메시가 장애물로 남아 있으면 밀기 플래닝이 충돌로 실패하므로 먼저 제거
-            self.remove_jenga_mesh()
-            time.sleep(0.5)  # 씬 업데이트 반영 대기
             if self.move_to_joints_moveit(PUSH_APPROACH_JOINTS_DEG):
+                # 접근 자세까지는 젠가 메시를 장애물로 유지하고, 실제 밀기 동작 전 제거한다.
+                self.remove_jenga_mesh()
+                time.sleep(0.5)  # 씬 업데이트 반영 대기
+                try:
+                    self.get_logger().info("밀기 전 OnRobot RG2 그리퍼를 닫습니다...")
+                    self.gripper.close_gripper()
+                    time.sleep(1.0)
+                except Exception as e:
+                    self.get_logger().error(f"밀기 전 그리퍼 닫기 실패: {e}")
                 self.move_to_joints_moveit(PUSH_TARGET_JOINTS_DEG)
             else:
                 self.get_logger().error("밀기 접근 자세 이동 실패 - 밀기 동작을 건너뜁니다.")
