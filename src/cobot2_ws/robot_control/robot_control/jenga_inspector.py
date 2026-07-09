@@ -1262,8 +1262,8 @@ class JengaInspectorNode(Node):
             face_name_str = face_names[f_idx]
             counter = Counter(face_results_buffer[f_idx])
             
-            # 5번의 각도 중 최소 2개 각도 이상에서 보이면 실제 구멍으로 인정 (더 견고한 필터링)
-            final_holes = [hole for hole, count in counter.items() if count >= 2]
+            # 4번의 각도 중 최소 1개 각도에서만 보이면 실제 구멍으로 인정 (사용자 요청에 따라 조건 완화)
+            final_holes = [hole for hole, count in counter.items() if count >= 1]
             self.get_logger().info(f"[{face_name_str}] 면 다중 각도 종합 필터링된 최종 구멍: {final_holes}")
             
             # Left, Front 면이 스캔되었을 경우 6층 맵 매칭을 위해 Right, Back 면 시점으로 좌우 반전(Mirror) 정규화
