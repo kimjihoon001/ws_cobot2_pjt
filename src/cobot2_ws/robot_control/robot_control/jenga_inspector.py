@@ -1310,7 +1310,23 @@ class JengaInspectorNode(Node):
         # 불합격이면 바로 젠가 블록을 밀어낸다 (접근 자세 → 미는 자세)
         if not is_pass:
             self.get_logger().info("검사 불합격 - 젠가 블록을 밀어냅니다...")
-            if self.move_to_joints_moveit(PUSH_APPROACH_JOINTS_DEG):
+
+            # 손이 감지되면 move_to_joints_moveit이 즉시 abort되므로, 손이 빠질 때까지
+            # 기다렸다가 재시도한다. 손 감지 외 사유로 실패하면 해당 이동만 건너뛴다.
+            def push_move_wait_for_hand(target_joints, name):
+                while rclpy.ok():
+                    if self.move_to_joints_moveit(target_joints):
+                        return True
+                    if self.hand_detected:
+                        self.get_logger().warn(f"손 감지됨 - 손이 빠질 때까지 대기 후 {name} 재시도...")
+                        while rclpy.ok() and self.hand_detected:
+                            time.sleep(0.5)
+                    else:
+                        self.get_logger().error(f"{name} 이동 실패(손 감지 외 사유) - 밀기 동작을 건너뜁니다.")
+                        return False
+                return False
+
+            if push_move_wait_for_hand(PUSH_APPROACH_JOINTS_DEG, "밀기 접근 자세"):
                 # 접근 자세까지는 젠가 메시를 장애물로 유지하고, 실제 밀기 동작 전 제거한다.
                 self.remove_jenga_mesh()
                 time.sleep(0.5)  # 씬 업데이트 반영 대기
@@ -1320,9 +1336,7 @@ class JengaInspectorNode(Node):
                     time.sleep(1.0)
                 except Exception as e:
                     self.get_logger().error(f"밀기 전 그리퍼 닫기 실패: {e}")
-                self.move_to_joints_moveit(PUSH_TARGET_JOINTS_DEG)
-            else:
-                self.get_logger().error("밀기 접근 자세 이동 실패 - 밀기 동작을 건너뜁니다.")
+                push_move_wait_for_hand(PUSH_TARGET_JOINTS_DEG, "밀기 목표 자세")
 
         # 6. Return back to Home position with safety evasion checks
         self.get_logger().info("Inspection complete. Returning to Home...")
