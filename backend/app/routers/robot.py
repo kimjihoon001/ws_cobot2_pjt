@@ -5,6 +5,29 @@ from .. import ros_bridge
 router = APIRouter(prefix="/api/robot", tags=["robot"])
 
 
+@router.get("/status")
+def robot_status():
+    if not ros_bridge._bridge:
+        return {
+            "connected": False,
+            "mode": "unknown",
+            "controller": "미연결",
+            "current_task": "대기",
+            "task_key": "idle",
+            "checks": {
+                "dsr": False,
+                "moveit": False,
+                "jenga_inspector": False,
+                "tool_pick": False,
+                "voice": False,
+                "hand": False,
+            },
+            "last_pick_task": "",
+            "ros_bridge": False,
+        }
+    return ros_bridge._bridge.get_robot_status()
+
+
 @router.post("/start_listen")
 def start_listen():
     """HMI '음성 시작' 버튼 -> get_keyword를 호출해 웨이크워드 대기를 켠다.

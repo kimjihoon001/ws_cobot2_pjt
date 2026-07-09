@@ -1,0 +1,51 @@
+import { useEffect, useState } from 'react'
+import * as robotApi from '../api/robot'
+import type { RobotStatus } from '../api/robot'
+
+const FALLBACK_STATUS: RobotStatus = {
+  connected: false,
+  mode: 'unknown',
+  controller: '미연결',
+  current_task: '대기',
+  task_key: 'idle',
+  checks: {
+    dsr: false,
+    moveit: false,
+    jenga_inspector: false,
+    tool_pick: false,
+    voice: false,
+    hand: false,
+  },
+  last_pick_task: '',
+  ros_bridge: false,
+}
+
+export function useRobotStatus(intervalMs = 2000) {
+  const [status, setStatus] = useState<RobotStatus>(FALLBACK_STATUS)
+
+  useEffect(() => {
+    let cancelled = false
+
+    const refresh = () => {
+      robotApi
+        .getStatus()
+        .then((next) => {
+          if (!cancelled) setStatus(next)
+        })
+        .catch(() => {
+          if (!cancelled) setStatus(FALLBACK_STATUS)
+        })
+    }
+
+    refresh()
+    const timer = window.setInterval(refresh, intervalMs)
+    window.addEventListener('focus', refresh)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+      window.removeEventListener('focus', refresh)
+    }
+  }, [intervalMs])
+
+  return status
+}

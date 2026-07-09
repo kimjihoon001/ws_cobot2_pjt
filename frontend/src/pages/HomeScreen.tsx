@@ -5,6 +5,7 @@ import type { Summary } from '../types/resource'
 import type { QcSummary } from '../types/qc'
 import { VoiceStartButton } from '../components/VoiceStartButton'
 import { DirectRobotActionButtons } from '../components/DirectRobotActionButtons'
+import { useRobotStatus } from '../hooks/useRobotStatus'
 
 type Screen = 'inventory' | 'qc' | 'robot' | 'work' | 'users'
 
@@ -17,6 +18,7 @@ export function HomeScreen({
 }) {
   const [invSummary, setInvSummary] = useState<Summary | null>(null)
   const [qcSummary, setQcSummary] = useState<QcSummary | null>(null)
+  const robotStatus = useRobotStatus()
 
   useEffect(() => {
     const refresh = () => {
@@ -75,8 +77,8 @@ export function HomeScreen({
           </div>
           <h3>로봇 관리</h3>
           <p className="tile-desc">연결 · 제어 · 안전관리</p>
-          <div className="tile-stat">미연결</div>
-          <div className="tile-note">현재 작업: 대기</div>
+          <div className="tile-stat">{robotStatus.connected ? '연결됨' : '미연결'}</div>
+          <div className="tile-note">현재 작업: {robotStatus.current_task}</div>
         </button>
 
         <button type="button" className="tile" onClick={() => onNavigate('work')}>
@@ -85,7 +87,7 @@ export function HomeScreen({
           </div>
           <h3>작업 화면</h3>
           <p className="tile-desc">현재 작업 현황 및 제어</p>
-          <div className="tile-stat">대기 중</div>
+          <div className="tile-stat">{robotStatus.current_task}</div>
         </button>
 
         {canManage && (

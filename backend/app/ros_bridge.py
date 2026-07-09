@@ -47,6 +47,7 @@ class VoiceBridgeNode(Node):
         super().__init__("voice_confirm_bridge")
         self._pending = None          # confirm_tools 대기 슬롯 (한 번에 하나만 가능)
         self._pending_release = None  # confirm_release 대기 슬롯 (한 번에 하나만 가능)
+        self._jenga_inspection_running = False
 
         # confirm_tools/confirm_release 콜백은 각각 최대 60초 threading.Event().wait()로
         # 블로킹된다. 실행기가 SingleThreadedExecutor면 그동안 다른 콜백(다른 쪽 확인 요청,
@@ -81,6 +82,7 @@ class VoiceBridgeNode(Node):
         """HMI 직접 실행 버튼. 음성 명령 없이 젠가 품질검사를 시작한다."""
         if not self._jenga_inspection_cli.service_is_ready():
             return False
+        self._jenga_inspection_running = True
         future = self._jenga_inspection_cli.call_async(Trigger.Request())
         future.add_done_callback(self._on_jenga_inspection_done)
         self.get_logger().info("HMI 직접 실행으로 젠가 품질 검사를 시작했습니다.")
@@ -135,6 +137,7 @@ class VoiceBridgeNode(Node):
             self.get_logger().info(f"run_jenga_inspection 완료: {result.message}")
         else:
             self.get_logger().error(f"run_jenga_inspection 실패: {result.message}")
+        self._jenga_inspection_running = False
 
     def _start_pending(self, kind: str, tools, targets) -> dict:
         """DB에 pending row 생성 + 화면에 띄울 payload 구성."""
@@ -258,6 +261,54 @@ class VoiceBridgeNode(Node):
 
     def get_pending_release_payload(self):
         return self._pending_release["payload"] if self._pending_release else None
+
+    def get_robot_status(self) -> dict:
+        service_names = set()
+        action_names = set()
+        try:
+            service_names = {name for name, _ in self.get_service_names_and_types()}
+            action_names = {name for name, _ in self.get_action_names_and_types()}
+        except Exception as e:
+            self.get_logger().warn(f"로봇 상태 조회 실패: {e}")
+
+        checks = {
+            "dsr": "/dsr01/system/get_robot_state" in service_names,
+            "moveit": "/move_action" in action_names,
+            "jenga_inspector": "/run_jenga_inspection" in service_names,
+            "tool_pick": self.count_subscribers("pick_task_tools") > 0,
+            "voice": "get_keyword" in service_names or "/get_keyword" in service_names,
+            "hand": "/get_hand_position" in service_names,
+        }
+        connected = checks["dsr"] and checks["moveit"]
+
+        current_task = "대기"
+        task_key = "idle"
+        if self._jenga_inspection_running:
+            current_task = "품질검사 진행 중"
+            task_key = "qc_running"
+        elif self._pending:
+            current_task = "도구 확인 대기"
+            task_key = "tool_confirm"
+        elif self._pending_release:
+            current_task = "배송 확인 대기"
+            task_key = "release_confirm"
+        elif self._hmi_get_keyword_in_flight:
+            current_task = "음성 명령 대기"
+            task_key = "voice_listening"
+        elif time.monotonic() - self._last_pick_task_at < 20.0:
+            current_task = "도구 전달 진행 중"
+            task_key = "tool_delivery"
+
+        return {
+            "connected": connected,
+            "mode": "real" if checks["dsr"] else "unknown",
+            "controller": "MoveIt" if checks["moveit"] else "미연결",
+            "current_task": current_task,
+            "task_key": task_key,
+            "checks": checks,
+            "last_pick_task": self._last_pick_task_data,
+            "ros_bridge": True,
+        }
 
 
 def _ros_spin():

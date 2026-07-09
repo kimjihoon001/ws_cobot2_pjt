@@ -1,4 +1,5 @@
 import { useVoiceBridge } from '../hooks/useVoiceBridge'
+import { useRobotStatus } from '../hooks/useRobotStatus'
 import { VoiceStartButton } from '../components/VoiceStartButton'
 
 const JOINTS = [
@@ -22,6 +23,8 @@ const CONTROL_BUTTONS = [
 
 export function WorkSessionPage() {
   const { connected, pending, pendingRelease, respond, respondRelease } = useVoiceBridge()
+  const robotStatus = useRobotStatus()
+  const robotStatusColor = robotStatus.connected ? 'var(--status-good)' : 'var(--status-critical)'
 
   return (
     <div>
@@ -66,7 +69,9 @@ export function WorkSessionPage() {
           ) : (
             <>
               <div className="stat-tile-label">현재 작업</div>
-              <div className="stat-tile-value">대기 중</div>
+              <div className="stat-tile-value" style={{ fontSize: 38 }}>
+                {robotStatus.current_task}
+              </div>
             </>
           )}
         </div>
@@ -106,19 +111,22 @@ export function WorkSessionPage() {
       <div className="task-status-row">
         <div className="stat-tile stat-tile-large">
           <div className="stat-tile-label">
-            <span className="status-dot" style={{ background: 'var(--status-critical)' }} />
+            <span className="status-dot" style={{ background: robotStatusColor }} />
             연결 상태
           </div>
-          <div className="stat-tile-value">{connected ? '연결됨' : '미연결'}</div>
+          <div className="stat-tile-value">{robotStatus.connected ? '연결됨' : '미연결'}</div>
+          <div className="stat-tile-label" style={{ marginTop: 8 }}>
+            HMI 브릿지: {connected ? '연결됨' : '미연결'}
+          </div>
         </div>
         <div className="stat-tile-group">
           <div className="stat-tile-group-item">
             <div className="stat-tile-label">모드</div>
-            <div className="stat-tile-value">-</div>
+            <div className="stat-tile-value">{robotStatus.mode}</div>
           </div>
           <div className="stat-tile-group-item">
             <div className="stat-tile-label">컨트롤러</div>
-            <div className="stat-tile-value">-</div>
+            <div className="stat-tile-value">{robotStatus.controller}</div>
           </div>
         </div>
       </div>
