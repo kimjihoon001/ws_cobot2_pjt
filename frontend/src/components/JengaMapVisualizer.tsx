@@ -19,91 +19,81 @@ export function JengaMapVisualizer({ mapData }: JengaMapProps) {
   // Floors 6 to 1
   const floors = ["6", "5", "4", "3", "2", "1"]
 
+  // 렌더링 헬퍼 함수
+  const renderSmallBlock = (status: string, key: number) => {
+    const isMissing = status === "X";
+    return (
+      <div key={key} style={{
+        width: '40px', height: '32px',
+        background: isMissing ? 'transparent' : 'linear-gradient(135deg, #deb887 0%, #faedcd 100%)',
+        border: isMissing ? '2px dashed var(--status-critical)' : '1px solid #bc8f8f',
+        borderRadius: '4px',
+        boxShadow: isMissing ? 'none' : 'inset -2px -2px 4px rgba(0,0,0,0.1), 1px 2px 3px rgba(0,0,0,0.2)'
+      }} />
+    )
+  }
+
+  const renderLongBlock = (status: string, key: number) => {
+    const isMissing = status === "X";
+    return (
+      <div key={key} style={{
+        width: '132px', height: '32px',
+        background: isMissing ? 'transparent' : 'linear-gradient(135deg, #deb887 0%, #faedcd 100%)',
+        border: isMissing ? '2px dashed var(--status-critical)' : '1px solid #bc8f8f',
+        borderRadius: '4px',
+        boxShadow: isMissing ? 'none' : 'inset -2px -2px 4px rgba(0,0,0,0.1), 1px 2px 3px rgba(0,0,0,0.2)'
+      }} />
+    )
+  }
+
+  const renderFace = (title: string, faceIndex: number) => (
+    <div key={faceIndex} style={{ padding: '15px', background: 'var(--surface-color)', borderRadius: '12px', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'center' }}>
+      <h4 style={{ margin: '0 0 10px 0', color: 'var(--text-color)', fontSize: '1rem' }}>{title}</h4>
+      {floors.map((floor) => {
+        const floorNum = parseInt(floor)
+        const blocks = parsedMapData[floor] || ["O", "O", "O"]
+        const isOdd = floorNum % 2 !== 0
+        
+        let viewMode: 'short' | 'long'
+        let blockArray: string[] = []
+        let longStatus: string = "O"
+
+        // 면(Face)의 방향에 따라 보이는 블록(외곽)을 결정
+        if (faceIndex === 1) { // Face 1 (Front)
+          if (isOdd) { viewMode = 'short'; blockArray = [blocks[0], blocks[1], blocks[2]] }
+          else       { viewMode = 'long'; longStatus = blocks[0] }
+        } else if (faceIndex === 2) { // Face 2 (Right)
+          if (isOdd) { viewMode = 'long'; longStatus = blocks[2] }
+          else       { viewMode = 'short'; blockArray = [blocks[0], blocks[1], blocks[2]] }
+        } else if (faceIndex === 3) { // Face 3 (Back)
+          if (isOdd) { viewMode = 'short'; blockArray = [blocks[2], blocks[1], blocks[0]] }
+          else       { viewMode = 'long'; longStatus = blocks[2] }
+        } else { // Face 4 (Left)
+          if (isOdd) { viewMode = 'long'; longStatus = blocks[0] }
+          else       { viewMode = 'short'; blockArray = [blocks[2], blocks[1], blocks[0]] }
+        }
+
+        return (
+          <div key={floor} style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+            <div style={{ width: '24px', fontWeight: 'bold', color: 'var(--text-muted)', fontSize: '0.9rem' }}>{floor}F</div>
+            {viewMode === 'short' 
+              ? blockArray.map((b, idx) => renderSmallBlock(b, idx))
+              : renderLongBlock(longStatus, 0)
+            }
+          </div>
+        )
+      })}
+    </div>
+  )
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px', marginTop: '20px' }}>
       <h3 style={{ margin: 0, color: 'var(--text-color)' }}>젠가 검사 맵 시각화 (YOLO)</h3>
-      <div style={{ display: 'flex', gap: '30px', width: '100%', justifyContent: 'center' }}>
-        {/* Face 1 View */}
-        <div style={{ padding: '20px', background: 'var(--surface-color)', borderRadius: '12px', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'center' }}>
-          <h4 style={{ margin: '0 0 10px 0', color: 'var(--text-color)' }}>면 1 (Face 1)</h4>
-          {floors.map((floor) => {
-            const floorNum = parseInt(floor)
-            const blocks = parsedMapData[floor] || ["O", "O", "O"]
-            const isOdd = floorNum % 2 !== 0
-            
-            if (isOdd) {
-              return (
-                <div key={floor} style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-                  <div style={{ width: '24px', fontWeight: 'bold', color: 'var(--text-muted)', fontSize: '0.9rem' }}>{floor}F</div>
-                  {blocks.map((block, idx) => (
-                    <div key={idx} style={{
-                      width: '40px', height: '32px',
-                      background: block === "X" ? 'transparent' : 'linear-gradient(135deg, #deb887 0%, #faedcd 100%)',
-                      border: block === "X" ? '2px dashed var(--status-critical)' : '1px solid #bc8f8f',
-                      borderRadius: '4px',
-                      boxShadow: block === "X" ? 'none' : 'inset -2px -2px 4px rgba(0,0,0,0.1), 1px 2px 3px rgba(0,0,0,0.2)'
-                    }} />
-                  ))}
-                </div>
-              )
-            } else {
-              const allMissing = blocks.every((b: string) => b === "X")
-              return (
-                <div key={floor} style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-                  <div style={{ width: '24px', fontWeight: 'bold', color: 'var(--text-muted)', fontSize: '0.9rem' }}>{floor}F</div>
-                  <div style={{
-                    width: '132px', height: '32px',
-                    background: allMissing ? 'transparent' : 'linear-gradient(135deg, #deb887 0%, #faedcd 100%)',
-                    border: allMissing ? '2px dashed var(--status-critical)' : '1px solid #bc8f8f',
-                    borderRadius: '4px',
-                    boxShadow: allMissing ? 'none' : 'inset -2px -2px 4px rgba(0,0,0,0.1), 1px 2px 3px rgba(0,0,0,0.2)'
-                  }} />
-                </div>
-              )
-            }
-          })}
-        </div>
-
-        {/* Face 2 View */}
-        <div style={{ padding: '20px', background: 'var(--surface-color)', borderRadius: '12px', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'center' }}>
-          <h4 style={{ margin: '0 0 10px 0', color: 'var(--text-color)' }}>면 2 (Face 2)</h4>
-          {floors.map((floor) => {
-            const floorNum = parseInt(floor)
-            const blocks = parsedMapData[floor] || ["O", "O", "O"]
-            const isOdd = floorNum % 2 !== 0
-            
-            if (!isOdd) {
-              return (
-                <div key={floor} style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-                  <div style={{ width: '24px', fontWeight: 'bold', color: 'var(--text-muted)', fontSize: '0.9rem' }}>{floor}F</div>
-                  {blocks.map((block, idx) => (
-                    <div key={idx} style={{
-                      width: '40px', height: '32px',
-                      background: block === "X" ? 'transparent' : 'linear-gradient(135deg, #deb887 0%, #faedcd 100%)',
-                      border: block === "X" ? '2px dashed var(--status-critical)' : '1px solid #bc8f8f',
-                      borderRadius: '4px',
-                      boxShadow: block === "X" ? 'none' : 'inset -2px -2px 4px rgba(0,0,0,0.1), 1px 2px 3px rgba(0,0,0,0.2)'
-                    }} />
-                  ))}
-                </div>
-              )
-            } else {
-              const allMissing = blocks.every((b: string) => b === "X")
-              return (
-                <div key={floor} style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-                  <div style={{ width: '24px', fontWeight: 'bold', color: 'var(--text-muted)', fontSize: '0.9rem' }}>{floor}F</div>
-                  <div style={{
-                    width: '132px', height: '32px',
-                    background: allMissing ? 'transparent' : 'linear-gradient(135deg, #deb887 0%, #faedcd 100%)',
-                    border: allMissing ? '2px dashed var(--status-critical)' : '1px solid #bc8f8f',
-                    borderRadius: '4px',
-                    boxShadow: allMissing ? 'none' : 'inset -2px -2px 4px rgba(0,0,0,0.1), 1px 2px 3px rgba(0,0,0,0.2)'
-                  }} />
-                </div>
-              )
-            }
-          })}
-        </div>
+      <div style={{ display: 'flex', gap: '20px', width: '100%', justifyContent: 'center', flexWrap: 'wrap' }}>
+        {renderFace('면 1 (Front)', 1)}
+        {renderFace('면 2 (Right)', 2)}
+        {renderFace('면 3 (Back)', 3)}
+        {renderFace('면 4 (Left)', 4)}
       </div>
       <p className="empty-state" style={{ marginTop: '0', marginBottom: '10px' }}>선택된 항목의 6층 젠가 블록 상태입니다.</p>
 
