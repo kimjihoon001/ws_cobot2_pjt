@@ -1460,120 +1460,75 @@ class JengaInspectorNode(Node):
         # 불합격이면 바로 젠가 블록을 밀어낸다 (접근 자세 → 미는 자세)
         if not is_pass:
             self.get_logger().info("검사 불합격 - 젠가 블록을 밀어냅니다...")
-            self.in_push_sequence = True
-            self.push_hand_seen = False
-            self.push_cancel_requested = False
-            self.clear_hand_obstacle()
-            time.sleep(0.3)
-
-            def wait_for_hand_clear_before_push(name):
-                clear_started_at = None
-
-                while rclpy.ok():
-                    if self.hand_detected or self.push_hand_seen:
-                        clear_started_at = None
-                        self.get_logger().warn(f"손 감지됨 - {name} 전 손이 빠질 때까지 대기합니다.")
-                        self.push_hand_seen = False
-                        self.push_cancel_requested = False
-                        while rclpy.ok() and self.hand_detected:
-                            time.sleep(0.5)
-                        continue
-
-                    if clear_started_at is None:
-                        clear_started_at = time.time()
-                        self.clear_hand_obstacle()
-
-                    if time.time() - clear_started_at >= 1.0:
-                        self.push_hand_seen = False
-                        self.push_cancel_requested = False
-                        self.get_logger().info(f"손 감지 해제 - {name}를 계속 진행합니다.")
-                        return True
-
-                    time.sleep(0.1)
-
-                return False
-
-            # 불량품 밀기 중에는 안전위치로 우회 이동하지 않고, 손이 빠질 때까지
-            # 멈춰 기다린다. 밀기 목표 자세에서 손이 감지되면 밀기 접근 자세부터
-            # 다시 시작할 수 있도록 호출부에 HAND_DETECTED 상태를 알려준다.
-            def push_move_wait_for_hand(target_joints, name):
-                scene_change_retry_count = 0
+            max_push_attempts = 5
+            for attempt in range(max_push_attempts):
+                self.in_push_sequence = True
+                self.push_hand_seen = False
+                self.push_cancel_requested = False
+                self.clear_hand_obstacle()
+                time.sleep(0.3)
+                push_aborted = False
 
                 while rclpy.ok():
-                    if not wait_for_hand_clear_before_push(name):
-                        return "failed"
+                    approach_result = push_move_check_hand(PUSH_APPROACH_JOINTS_DEG, "밀기 접근 자세")
+                    if approach_result == "abort":
+                        self.get_logger().error("밀기 접근 중 손이 감지되어 밀기 시퀀스를 완전히 중단합니다.")
+                        push_aborted = True
+                        break
+                    if approach_result != "success":
+                        break
 
-                    if self.move_to_joints_moveit(target_joints):
-                        return "success"
+                    if not check_hand_before_action("그리퍼 닫기"):
+                        self.get_logger().error("그리퍼 닫기 전 손이 감지되어 밀기 시퀀스를 완전히 중단합니다.")
+                        push_aborted = True
+                        break
 
-                    if self.hand_detected or self.last_moveit_error_code == 'HAND_DETECTED':
-                        self.get_logger().warn(f"{name} 중 손 감지됨 - 정지 후 손이 빠지면 같은 단계 재시도...")
-                        return "hand_detected"
-                    elif self.last_moveit_error_code == -3:
-                        self.request_doosan_quick_stop(f"{name} 중 MoveIt -3(scene 변화)")
-                        scene_change_retry_count += 1
-                        if scene_change_retry_count > 3:
-                            self.get_logger().error(
-                                f"{name} 중 MoveIt scene 변화가 반복됨 - 3회 재시도 후 밀기 동작을 건너뜁니다."
-                            )
-                            return "failed"
-
-                        self.get_logger().warn(
-                            f"{name} 중 MoveIt scene 변화 감지됨 - 1초 대기 후 같은 밀기 자세 재시도 "
-                            f"({scene_change_retry_count}/3)..."
-                        )
-                        time.sleep(1.0)
-                    else:
-                        self.get_logger().error(f"{name} 이동 실패(손 감지 외 사유) - 밀기 동작을 건너뜁니다.")
-                        return "failed"
-                return "failed"
-
-            while rclpy.ok():
-                approach_result = push_move_wait_for_hand(PUSH_APPROACH_JOINTS_DEG, "밀기 접근 자세")
-                if approach_result == "hand_detected":
-                    self.get_logger().warn("밀기 접근 중 손 감지됨 - 손이 빠지면 밀기 접근 자세부터 다시 시도합니다.")
-                    continue
-                if approach_result != "success":
-                    break
-
-                if not wait_for_hand_clear_before_push("그리퍼 닫기"):
-                    self.get_logger().warn("그리퍼 닫기 전 대기 중 종료됨 - 밀기 동작을 중단합니다.")
-                    break
-
-                # 접근 자세까지는 젠가 메시를 장애물로 유지하고, 실제 밀기 동작 전 제거한다.
-                self.remove_jenga_mesh()
-                time.sleep(0.5)  # 씬 업데이트 반영 대기
-                try:
-                    self.get_logger().info("밀기 전 OnRobot RG2 그리퍼를 닫습니다...")
-                    self.gripper.close_gripper()
-                    time.sleep(1.0)
-                except Exception as e:
-                    self.get_logger().error(f"밀기 전 그리퍼 닫기 실패: {e}")
-
-                target_result = push_move_wait_for_hand(PUSH_TARGET_JOINTS_DEG, "밀기 목표 자세")
-                if target_result == "success":
-                    break
-                if target_result == "hand_detected":
-                    self.get_logger().warn(
-                        "밀기 목표 자세 이동 중 손 감지됨 - 안전을 위해 그리퍼를 열고 젠가 가상 씬을 복구한 뒤 밀기 접근 자세부터 다시 진행합니다."
-                    )
+                    # 접근 자세까지는 젠가 메시를 장애물로 유지하고, 실제 밀기 동작 전 제거한다.
+                    self.remove_jenga_mesh()
+                    time.sleep(0.5)  # 씬 업데이트 반영 대기
                     try:
-                        self.gripper.open_gripper()
+                        self.get_logger().info("밀기 전 OnRobot RG2 그리퍼를 닫습니다...")
+                        self.gripper.close_gripper()
                         time.sleep(1.0)
                     except Exception as e:
-                        self.get_logger().error(f"복귀 전 그리퍼 열기 실패: {e}")
-                    
-                    if getattr(self, 'last_jenga_spawn_params', None) is not None:
-                        self.spawn_jenga_mesh(*self.last_jenga_spawn_params)
-                        time.sleep(0.5)
-                        
-                    continue
-                break
+                        self.get_logger().error(f"밀기 전 그리퍼 닫기 실패: {e}")
 
-            self.in_push_sequence = False
-            self.push_hand_seen = False
-            self.push_cancel_requested = False
-            self.clear_hand_obstacle()
+                    target_result = push_move_check_hand(PUSH_TARGET_JOINTS_DEG, "밀기 목표 자세")
+                    if target_result == "success":
+                        break
+                    if target_result == "abort":
+                        self.get_logger().error(
+                            "밀기 목표 자세 이동 중 손 감지됨 - 안전을 위해 작업을 전면 취소하고 그리퍼를 연 뒤 복귀합니다."
+                        )
+                        try:
+                            self.gripper.open_gripper()
+                            time.sleep(1.0)
+                        except Exception as e:
+                            self.get_logger().error(f"복귀 전 그리퍼 열기 실패: {e}")
+                        
+                        if getattr(self, 'last_jenga_spawn_params', None) is not None:
+                            self.spawn_jenga_mesh(*self.last_jenga_spawn_params)
+                            time.sleep(0.5)
+                            
+                        push_aborted = True
+                        break
+                    break
+
+                self.in_push_sequence = False
+                self.push_hand_seen = False
+                self.push_cancel_requested = False
+                self.clear_hand_obstacle()
+
+                if push_aborted:
+                    if attempt < max_push_attempts - 1:
+                        self.get_logger().warn(f"밀기 작업 취소됨. 홈으로 복귀하여 안전을 확보한 후 재시도합니다... (남은 재시도: {max_push_attempts - attempt - 1})")
+                        self.move_to_joints_moveit(JReady)
+                        time.sleep(2.0)
+                    else:
+                        self.get_logger().error("밀기 재시도 횟수를 초과하여 불량품 배출을 포기합니다.")
+                else:
+                    # 밀기 성공 혹은 손 감지가 아닌 다른 이유로 실패한 경우 탈출
+                    break
 
         # 6. Return back to Home position with safety evasion checks
         self.get_logger().info("Inspection complete. Returning to Home...")
