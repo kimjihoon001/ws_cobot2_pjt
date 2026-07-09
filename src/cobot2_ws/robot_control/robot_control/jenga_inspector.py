@@ -958,6 +958,42 @@ class JengaInspectorNode(Node):
         self.scene_pub.publish(scene)
         self.get_logger().info("Planning scene update published.")
 
+    def save_home_top_image(self):
+        """홈(JReady)에서 top을 찍을 때 현재 카메라 프레임을 사진으로 남긴다."""
+        if self.latest_image is None:
+            self.get_logger().warn("홈 top 사진 저장 실패 - 카메라 프레임이 아직 없습니다.")
+            return
+        possible_paths = [
+            os.path.expanduser("~/ws_cobot2_pjt/backend"),
+            os.path.expanduser("~/cobot_ws/src/ws_cobot2_pjt/backend"),
+        ]
+        db_dir = possible_paths[0]
+        for p in possible_paths:
+            if os.path.exists(p):
+                db_dir = p
+                break
+        save_dir = os.path.join(db_dir, "static", "inspection_images")
+        os.makedirs(save_dir, exist_ok=True)
+        timestamp = int(time.time() * 1000)
+        filename = os.path.join(save_dir, f"inspection_home_top_{timestamp}.jpg")
+        if cv2.imwrite(filename, self.latest_image):
+            self.get_logger().info(f"홈 top 사진 저장 완료: {filename}")
+        else:
+            self.get_logger().error(f"홈 top 사진 저장 실패: {filename}")
+
+    def remove_jenga_mesh(self):
+        """Removes the spawned Jenga mesh from the MoveIt planning scene."""
+        obj = CollisionObject()
+        obj.header.frame_id = 'base_link'
+        obj.id = 'jenga_assembly'
+        obj.operation = CollisionObject.REMOVE
+
+        scene = PlanningScene()
+        scene.world.collision_objects = [obj]
+        scene.is_diff = True
+        self.scene_pub.publish(scene)
+        self.get_logger().info("Removed Jenga mesh from planning scene.")
+
     def _apply_fallback_box(self, obj, x, y, z, yaw):
         box = SolidPrimitive()
         box.type = SolidPrimitive.BOX
@@ -1103,6 +1139,9 @@ class JengaInspectorNode(Node):
   
         x_cam, y_cam, z_cam, yaw_cam = res.depth_position[:4]
         self.get_logger().info(f"Detected Jenga camera pose: x={x_cam:.2f}, y={y_cam:.2f}, z={z_cam:.2f}, yaw={yaw_cam:.4f}")
+
+        # 홈에서 top을 찍은 시점의 사진을 남긴다
+        self.save_home_top_image()
   
         # Translate to Base frame using non-blocking TF lookup
         robot_posx = self.get_current_pose_tf()
@@ -1268,6 +1307,9 @@ class JengaInspectorNode(Node):
         # 불합격이면 바로 젠가 블록을 밀어낸다 (접근 자세 → 미는 자세)
         if not is_pass:
             self.get_logger().info("검사 불합격 - 젠가 블록을 밀어냅니다...")
+            # 스폰한 젠가 메시가 장애물로 남아 있으면 밀기 플래닝이 충돌로 실패하므로 먼저 제거
+            self.remove_jenga_mesh()
+            time.sleep(0.5)  # 씬 업데이트 반영 대기
             if self.move_to_joints_moveit(PUSH_APPROACH_JOINTS_DEG):
                 self.move_to_joints_moveit(PUSH_TARGET_JOINTS_DEG)
             else:
