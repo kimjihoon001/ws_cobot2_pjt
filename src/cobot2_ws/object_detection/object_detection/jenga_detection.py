@@ -18,7 +18,8 @@ class JengaDetectionNode(Node):
     def __init__(self):
         super().__init__('jenga_detection_node')
         self.img_node = ImgNode()
-        self.yolo_client = self.create_client(YoloInference, '/vision/get_bboxes')
+        self.yolo_client_node = rclpy.create_node('jenga_detection_yolo_client')
+        self.yolo_client = self.yolo_client_node.create_client(YoloInference, '/vision/get_bboxes')
         self.intrinsics = self._wait_for_valid_data(
             self.img_node.get_camera_intrinsic, "camera intrinsics"
         )
@@ -44,7 +45,7 @@ class JengaDetectionNode(Node):
         req.model_name = 'jenga'
         req.confidence_threshold = conf
         future = self.yolo_client.call_async(req)
-        rclpy.spin_until_future_complete(self, future)
+        rclpy.spin_until_future_complete(self.yolo_client_node, future)
         res = future.result()
         if res and res.success:
             try:

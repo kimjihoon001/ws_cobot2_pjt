@@ -25,7 +25,8 @@ class YoloModel:
         self.node = node
         self.last_detection_frame = None
 
-        self.yolo_client = self.node.create_client(YoloInference, '/vision/get_bboxes')
+        self.client_node = rclpy.create_node('hand_yolo_client_node')
+        self.yolo_client = self.client_node.create_client(YoloInference, '/vision/get_bboxes')
 
         with open(YOLO_JSON_PATH, "r", encoding="utf-8") as file:
             hand_class_dict = json.load(file)
@@ -67,7 +68,7 @@ class YoloModel:
         req.confidence_threshold = 0.5
         
         future = self.yolo_client.call_async(req)
-        rclpy.spin_until_future_complete(self.node, future)
+        rclpy.spin_until_future_complete(self.client_node, future)
         res = future.result()
         
         detections = []

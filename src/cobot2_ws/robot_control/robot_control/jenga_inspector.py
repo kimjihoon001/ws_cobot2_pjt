@@ -105,7 +105,8 @@ DOOSAN_MOVE_STOP_SERVICE = f'/{ROBOT_ID}/motion/move_stop'
 class JengaInspectorNode(Node):
     def __init__(self):
         super().__init__("jenga_inspector")
-        self.yolo_client = self.create_client(YoloInference, '/vision/get_bboxes')
+        self.yolo_client_node = rclpy.create_node('jenga_inspector_yolo_client')
+        self.yolo_client = self.yolo_client_node.create_client(YoloInference, '/vision/get_bboxes')
         self.declare_parameter("force_insufficient_images_alert", False)
         self.package_path = get_package_share_directory("robot_control")
         self.init_database()
@@ -1276,7 +1277,7 @@ class JengaInspectorNode(Node):
         req.model_name = 'inspector'
         req.confidence_threshold = conf
         future = self.yolo_client.call_async(req)
-        rclpy.spin_until_future_complete(self, future)
+        rclpy.spin_until_future_complete(self.yolo_client_node, future)
         res = future.result()
         if res and res.success:
             try:
