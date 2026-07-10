@@ -13,6 +13,7 @@ export function useVoiceBridge(url = 'ws://127.0.0.1:8000/ws') {
   const [pending, setPending] = useState<PendingConfirm | null>(null)
   const [pendingRelease, setPendingRelease] = useState<PendingConfirm | null>(null)
   const [connected, setConnected] = useState(false)
+  const [hmiAlert, setHmiAlert] = useState<string | null>(null)
 
   // WS는 폴링 주기(1초)보다 빠르게 새 요청이 생겼다는 걸 알아채는 용도로만 사용 —
   // 실제 정답 소스와 응답 제출은 전부 DB 기반 REST(/api/voice/requests/*)로 처리한다.
@@ -25,8 +26,14 @@ export function useVoiceBridge(url = 'ws://127.0.0.1:8000/ws') {
       wsRef.current = ws
 
       ws.onopen = () => setConnected(true)
-      ws.onmessage = () => {
-        // 페이로드 내용과 무관하게, 뭔가 새로 생겼다는 신호로만 쓰고 폴링에서 다시 읽는다.
+      ws.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data)
+          if (payload.type === 'alert') {
+            setHmiAlert(payload.message)
+            setTimeout(() => setHmiAlert(null), 5000)
+          }
+        } catch {}
       }
       ws.onclose = () => {
         setConnected(false)
@@ -93,5 +100,5 @@ export function useVoiceBridge(url = 'ws://127.0.0.1:8000/ws') {
     [pendingRelease, respondTo],
   )
 
-  return { connected, pending, pendingRelease, respond, respondRelease }
+  return { connected, pending, pendingRelease, respond, respondRelease, hmiAlert }
 }

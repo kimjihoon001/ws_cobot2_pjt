@@ -362,6 +362,7 @@ class PickYoloTarget(Node):
         # MoveIt PlanningScene 관리용 퍼블리셔
         self._collision_pub = self.create_publisher(CollisionObject, '/collision_object', 10)
         self._attached_collision_pub = self.create_publisher(AttachedCollisionObject, '/attached_collision_object', 10)
+        self._hmi_alert_pub = self.create_publisher(String, '/hmi_alert', 10)
 
         self.tf_buffer = tf2_ros.Buffer()
         # TransformListener 전용 노드를 분리하고 백그라운드 스레드에서 스핀하도록 설정 (콜백 큐 간섭 방지)
@@ -1690,7 +1691,13 @@ class PickYoloTarget(Node):
             self.get_logger().info(f'{class_name} 탐지 대기중...')
             detection = self.detect_once(target_class=class_name)
             if detection is None:
-                self.get_logger().error(f'{tool_name}({class_name}) 탐지 실패 (타임아웃) - 건너뜀')
+                self.get_logger().error("도구를 발견하지 못했습니다")
+                msg = String()
+                msg.data = "도구를 발견하지 못했습니다"
+                self._hmi_alert_pub.publish(msg)
+                
+                # 툴 탐지 실패 시 조인트값 기준 0,0,90,0,90,0의 위치로 이동
+                self.move_to_joints([math.radians(d) for d in [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]])
                 continue
 
             delivery_joints_deg = TOOL_DELIVERY_JOINTS_DEG.get(class_name, TOOL_SCAN_JOINTS_DEG)

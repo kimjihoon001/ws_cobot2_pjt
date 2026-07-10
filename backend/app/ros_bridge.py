@@ -130,6 +130,7 @@ class VoiceBridgeNode(Node):
         self._pick_task_pub = self.create_publisher(String, "pick_task_tools", 10)
         self._hmi_stop_pub = self.create_publisher(String, "hmi/emergency_stop", 10)
         self._display_trajectory_pub = self.create_publisher(DisplayTrajectory, "/display_planned_path", 10)
+        self._hmi_alert_sub = self.create_subscription(String, "hmi_alert", self._hmi_alert_cb, 10, callback_group=cb_group)
         for topic in ("/joint_states", "/dsr01/joint_states", "/dsr01/gz/joint_states", "/gripper_joint_states"):
             self.create_subscription(JointState, topic, self._handle_joint_state, 10, callback_group=cb_group)
         self.create_subscription(OnRobotRGInput, "/OnRobotRGInput", self._handle_gripper_status, 10, callback_group=cb_group)
@@ -494,19 +495,28 @@ class VoiceBridgeNode(Node):
         self._publish_pick_task_data(result.message, "get_keyword_done")
         self._hmi_get_keyword_in_flight = False
 
+    def _broadcast_alert(self, msg: str):
+        if _loop:
+            asyncio.run_coroutine_threadsafe(broadcast({"type": "alert", "message": msg}), _loop)
+
     def _on_jenga_inspection_done(self, future):
         try:
             result = future.result()
         except Exception as e:
             self.get_logger().error(f"run_jenga_inspection 호출 실패: {e}")
+            self._broadcast_alert(f"검사 실패: {e}")
+            self._jenga_inspection_running = False
             return
         if result is None:
             self.get_logger().error("run_jenga_inspection 응답 없음")
+            self._broadcast_alert("검사 실패: 로봇 응답 없음")
+            self._jenga_inspection_running = False
             return
         if result.success:
             self.get_logger().info(f"run_jenga_inspection 완료: {result.message}")
         else:
             self.get_logger().error(f"run_jenga_inspection 실패: {result.message}")
+            self._broadcast_alert(f"검사 실패: {result.message}")
         self._jenga_inspection_running = False
 
     def _start_pending(self, kind: str, tools, targets) -> dict:
@@ -631,6 +641,13 @@ class VoiceBridgeNode(Node):
 
     def get_pending_release_payload(self):
         return self._pending_release["payload"] if self._pending_release else None
+
+    def _hmi_alert_cb(self, msg: String):
+        if _loop:
+            asyncio.run_coroutine_threadsafe(
+                broadcast({"type": "alert", "message": msg.data}),
+                _loop,
+            )
 
     def _is_conveyor_available(self) -> bool:
         try:
