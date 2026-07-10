@@ -173,6 +173,7 @@ class JengaInspectorNode(Node):
         self.depth_sub = self.create_subscription(Image, '/camera/camera/aligned_depth_to_color/image_raw', self.depth_callback, 10, callback_group=cb_group)
         self.info_sub = self.create_subscription(CameraInfo, '/camera/camera/color/camera_info', self.info_callback, 10, callback_group=cb_group)
         self.image_pub = self.create_publisher(Image, '/yolo/result_image', 10)
+        self.hmi_alert_pub = self.create_publisher(String, '/hmi_alert', 10)
 
         # Helper node for blocking action and service calls to prevent executor deadlock
         self.action_node = rclpy.create_node("jenga_inspector_action_node")
@@ -226,6 +227,7 @@ class JengaInspectorNode(Node):
         self.current_hand_pos = None
         self.active_goal_handle = None
         self.hmi_stop_requested = False
+        self.hmi_cancel_requested = False
         self.in_evasion = False
         self.in_push_sequence = False
         self.push_hand_seen = False
@@ -255,7 +257,18 @@ class JengaInspectorNode(Node):
     def hmi_stop_callback(self, msg):
         if msg.data == "release":
             self.hmi_stop_requested = False
-            self.get_logger().info("HMI 긴급정지 해제 신호 수신.")
+            self.hmi_cancel_requested = False
+            self.get_logger().info("HMI 정지/취소 해제 신호 수신.")
+            return
+        if msg.data == "cancel":
+            self.hmi_cancel_requested = True
+            self.get_logger().warn("HMI 작업 취소 신호 수신 - 현재 MoveGroup goal 취소 요청.")
+            goal_handle = self.active_goal_handle
+            if goal_handle is not None:
+                try:
+                    goal_handle.cancel_goal_async()
+                except Exception as e:
+                    self.get_logger().error(f"HMI 작업 취소 goal 취소 요청 실패: {e}")
             return
         self.hmi_stop_requested = True
         self.get_logger().warn("HMI 긴급정지 신호 수신 - 현재 MoveGroup goal 취소 요청.")
@@ -770,7 +783,7 @@ class JengaInspectorNode(Node):
         hand_blocks_motion = lambda: self.hand_detected or (
             getattr(self, 'in_push_sequence', False)
             and (getattr(self, 'push_hand_seen', False) or getattr(self, 'push_cancel_requested', False))
-        ) or self.hmi_stop_requested
+        ) or self.hmi_stop_requested or self.hmi_cancel_requested
 
         # Convert degrees to radians
         joint_positions_rad = [np.radians(angle) for angle in joint_positions_deg]
@@ -805,7 +818,7 @@ class JengaInspectorNode(Node):
 
         # Check before sending goal (bypass check if in safety evasion mode)
         if hand_blocks_motion() and not getattr(self, 'in_evasion', False):
-            self.last_moveit_error_code = 'HMI_STOP' if self.hmi_stop_requested else 'HAND_DETECTED'
+            self.last_moveit_error_code = 'HMI_STOP' if self.hmi_stop_requested or self.hmi_cancel_requested else 'HAND_DETECTED'
             self.get_logger().warn('정지 조건 감지: planning 전 이동을 중단합니다.')
             return False
 
@@ -815,7 +828,7 @@ class JengaInspectorNode(Node):
         
         while rclpy.ok() and not send_future.done():
             if hand_blocks_motion() and not getattr(self, 'in_evasion', False):
-                self.last_moveit_error_code = 'HMI_STOP' if self.hmi_stop_requested else 'HAND_DETECTED'
+                self.last_moveit_error_code = 'HMI_STOP' if self.hmi_stop_requested or self.hmi_cancel_requested else 'HAND_DETECTED'
                 cancel_after_accept = True
                 self.get_logger().warn('정지 조건 감지: MoveGroup goal 수락 즉시 취소합니다.')
                 if getattr(self, 'in_push_sequence', False):
@@ -863,7 +876,7 @@ class JengaInspectorNode(Node):
         self.active_goal_handle = None
         
         if aborted:
-            self.last_moveit_error_code = 'HMI_STOP' if self.hmi_stop_requested else 'HAND_DETECTED'
+            self.last_moveit_error_code = 'HMI_STOP' if self.hmi_stop_requested or self.hmi_cancel_requested else 'HAND_DETECTED'
             return False
 
         result = result_future.result().result
@@ -879,6 +892,9 @@ class JengaInspectorNode(Node):
         """밀기 중 취소 후 홈이 아니라 밀기 1 위치(PUSH_APPROACH_JOINTS_DEG)로 복귀한다."""
         if self.hmi_stop_requested:
             self.get_logger().warn("HMI 긴급정지 상태라 밀기 1 위치 복귀 명령을 보내지 않습니다.")
+            return False
+        if self.hmi_cancel_requested:
+            self.get_logger().warn("HMI 작업 취소 상태라 밀기 1 위치 복귀 명령을 보내지 않습니다.")
             return False
 
         self.get_logger().warn("밀기 동작 취소됨 - 현재 동작 정지 후 밀기 1 위치로 복귀합니다.")
@@ -1124,7 +1140,7 @@ class JengaInspectorNode(Node):
         """홈(JReady)에서 top을 찍을 때 YOLO 검출 결과를 그려 사진으로 남긴다."""
         if self.latest_image is None:
             self.get_logger().warn("홈 top 사진 저장 실패 - 카메라 프레임이 아직 없습니다.")
-            return
+            return None
         # YOLO 검출 결과를 프레임에 그려서 저장 (검출 없으면 원본 프레임)
         results = self.model(self.latest_image.copy(), conf=0.60, verbose=False)
         frame_to_save = results[0].plot() if len(results) > 0 else self.latest_image
@@ -1140,11 +1156,30 @@ class JengaInspectorNode(Node):
         save_dir = os.path.join(db_dir, "static", "inspection_images")
         os.makedirs(save_dir, exist_ok=True)
         timestamp = int(time.time() * 1000)
-        filename = os.path.join(save_dir, f"inspection_home_top_{timestamp}.jpg")
+        img_filename = f"inspection_home_top_{timestamp}.jpg"
+        filename = os.path.join(save_dir, img_filename)
         if cv2.imwrite(filename, frame_to_save):
             self.get_logger().info(f"홈 top 사진 저장 완료: {filename}")
+            return f"/static/inspection_images/{img_filename}"
         else:
             self.get_logger().error(f"홈 top 사진 저장 실패: {filename}")
+            return None
+
+    def publish_jenga_exception_alert(self, kind, title, message, image_url=None):
+        payload = {
+            "type": "alert",
+            "kind": kind,
+            "title": title,
+            "message": message,
+            "image_url": image_url,
+            "actions": [
+                {"label": "재검사", "command": "retry_jenga", "variant": "primary"},
+                {"label": "작업 취소", "command": "cancel_task", "variant": "danger"},
+            ],
+        }
+        msg = String()
+        msg.data = json.dumps(payload, ensure_ascii=False)
+        self.hmi_alert_pub.publish(msg)
 
     def remove_jenga_mesh(self):
         """Removes the spawned Jenga mesh from the MoveIt planning scene."""
@@ -1225,7 +1260,7 @@ class JengaInspectorNode(Node):
         
         while rclpy.ok() and thread.is_alive():
             time.sleep(0.1)
-            
+        self.hmi_cancel_requested = False
         return response
 
     def _run_inspection_thread(self, request, response):
@@ -1240,9 +1275,9 @@ class JengaInspectorNode(Node):
             self.conveyor.move(CONVEYOR_MOVE_TO_INSPECTION_STEPS)
             deadline = time.time() + CONVEYOR_MOVE_TO_INSPECTION_WAIT_SEC
             while time.time() < deadline:
-                if self.hmi_stop_requested:
+                if self.hmi_stop_requested or self.hmi_cancel_requested:
                     response.success = False
-                    response.message = "HMI 긴급정지로 검사 시작 전 중단됨"
+                    response.message = "HMI 정지/취소로 검사 시작 전 중단됨"
                     return
                 time.sleep(0.1)
             self.get_logger().info("컨베이어 도착 예상 - 검사를 시작합니다.")
@@ -1308,6 +1343,13 @@ class JengaInspectorNode(Node):
             
         res = future.result()
         if not res or len(res.depth_position) < 4 or sum(res.depth_position[:3]) == 0:
+            image_url = self.save_home_top_image()
+            self.publish_jenga_exception_alert(
+                "jenga_missing",
+                "젠가 미검출",
+                "젠가를 찾지 못했거나 감지 범위를 벗어났습니다. 위치를 확인한 뒤 재검사하거나 작업을 취소하세요.",
+                image_url,
+            )
             response.success = False
             response.message = "젠가 블록을 찾지 못했거나 범위를 벗어났습니다."
             return
@@ -1366,6 +1408,13 @@ class JengaInspectorNode(Node):
 
         if best_pair is None:
             self.get_logger().error("충분한 사진을 찍을 수 없습니다 (각 면당 최소 2장 확보 실패). 검사 취소.")
+            image_url = self.current_inspection_images[-1] if self.current_inspection_images else self.save_home_top_image()
+            self.publish_jenga_exception_alert(
+                "jenga_insufficient_images",
+                "젠가 촬영 부족",
+                "각 면당 필요한 사진을 충분히 확보하지 못했습니다. 젠가 위치를 조정한 뒤 재검사하거나 작업을 취소하세요.",
+                image_url,
+            )
             response.success = False
             response.message = "충분히 사진을 찍을 수 없는 위치입니다. 젠가를 다시 배치해주세요."
             return

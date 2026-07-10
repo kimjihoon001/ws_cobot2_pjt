@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import { useRobotStatus } from '../hooks/useRobotStatus'
-import { useVoiceBridge } from '../hooks/useVoiceBridge'
 
 const API_BASE = 'http://127.0.0.1:8000'
 
@@ -48,7 +47,6 @@ function BoltIcon() {
 
 export function DirectRobotActionButtons() {
   const robotStatus = useRobotStatus(1000)
-  const { hmiAlert } = useVoiceBridge()
   const [clickErrors, setClickErrors] = useState<Record<string, boolean>>({})
 
   const runAction = async (action: DirectAction) => {
@@ -93,22 +91,6 @@ export function DirectRobotActionButtons() {
           )
         })}
       </div>
-      {hmiAlert && (
-        <div style={{ 
-          marginTop: '0.5rem', 
-          padding: '0.75rem 1rem', 
-          backgroundColor: '#ffebee', 
-          color: '#c62828', 
-          borderRadius: '8px',
-          fontWeight: 'bold',
-          fontSize: '0.9rem',
-          border: '1px solid #ef9a9a',
-          boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
-          animation: 'fadeIn 0.3s'
-        }}>
-          ⚠️ {hmiAlert}
-        </div>
-      )}
     </div>
   )
 }

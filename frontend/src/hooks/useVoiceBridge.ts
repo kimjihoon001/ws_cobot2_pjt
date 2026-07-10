@@ -6,6 +6,21 @@ export interface PendingConfirm {
   targets: string[]
 }
 
+export interface HmiAlertAction {
+  label: string
+  command: 'retry_jenga' | 'retry_tool' | 'cancel_task' | 'dismiss'
+  variant?: 'primary' | 'danger' | 'secondary'
+}
+
+export interface HmiAlert {
+  id: number
+  kind: string
+  title: string
+  message: string
+  imageUrl?: string
+  actions: HmiAlertAction[]
+}
+
 const API_BASE = 'http://127.0.0.1:8000'
 
 export function useVoiceBridge(url = 'ws://127.0.0.1:8000/ws') {
@@ -13,7 +28,7 @@ export function useVoiceBridge(url = 'ws://127.0.0.1:8000/ws') {
   const [pending, setPending] = useState<PendingConfirm | null>(null)
   const [pendingRelease, setPendingRelease] = useState<PendingConfirm | null>(null)
   const [connected, setConnected] = useState(false)
-  const [hmiAlert, setHmiAlert] = useState<string | null>(null)
+  const [hmiAlert, setHmiAlert] = useState<HmiAlert | null>(null)
 
   // WS는 폴링 주기(1초)보다 빠르게 새 요청이 생겼다는 걸 알아채는 용도로만 사용 —
   // 실제 정답 소스와 응답 제출은 전부 DB 기반 REST(/api/voice/requests/*)로 처리한다.
@@ -30,8 +45,14 @@ export function useVoiceBridge(url = 'ws://127.0.0.1:8000/ws') {
         try {
           const payload = JSON.parse(event.data)
           if (payload.type === 'alert') {
-            setHmiAlert(payload.message)
-            setTimeout(() => setHmiAlert(null), 5000)
+            setHmiAlert({
+              id: Date.now(),
+              kind: payload.kind ?? 'generic',
+              title: payload.title ?? '경고',
+              message: payload.message ?? String(payload.message ?? ''),
+              imageUrl: payload.image_url,
+              actions: payload.actions ?? [{ label: '확인', command: 'dismiss', variant: 'primary' }],
+            })
           }
         } catch {}
       }

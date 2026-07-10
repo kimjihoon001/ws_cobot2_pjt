@@ -61,7 +61,7 @@ def start_listen():
 def run_inspection():
     """HMI 직접 실행 버튼 -> 음성 명령 없이 젠가 품질검사를 시작한다."""
     started = ros_bridge._bridge.start_jenga_inspection() if ros_bridge._bridge else False
-    return {"started": started}
+    return {"started": started, "message": "젠가 재검사를 시작했습니다." if started else "검사 노드 없음"}
 
 
 @router.post("/deliver_hammer_screwdriver")
@@ -69,6 +69,22 @@ def deliver_hammer_screwdriver():
     """HMI 직접 실행 버튼 -> 음성 명령 없이 hammer/screwdriver 전달을 시작한다."""
     started = ros_bridge._bridge.deliver_hammer_screwdriver() if ros_bridge._bridge else False
     return {"started": started}
+
+
+@router.post("/retry_pick_task")
+def retry_pick_task():
+    """HMI 예외 팝업 -> 마지막 도구 작업을 다시 스캔/배송한다."""
+    if not ros_bridge._bridge:
+        return {"success": False, "message": "ROS 브릿지 미연결"}
+    return ros_bridge._bridge.retry_last_pick_task()
+
+
+@router.post("/cancel_task")
+def cancel_task():
+    """HMI 예외 팝업 -> 현재 작업 취소 및 홈 복귀 요청."""
+    if not ros_bridge._bridge:
+        return {"success": False, "message": "ROS 브릿지 미연결"}
+    return ros_bridge._bridge.cancel_task()
 
 
 @router.post("/move_home")

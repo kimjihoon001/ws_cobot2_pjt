@@ -1,4 +1,6 @@
 import math
+import json
+import os
 import struct
 import time
 import cv2
@@ -142,8 +144,8 @@ USE_GRIPPER = True
 # 사용자가 공구를 잡아당기는 힘(외력) 감지 임계값 (Nm, 관절 토크 변동 기준)
 # 4.0 Nm은 실기 충돌 한계와 겹쳐 로봇이 비상 정지할 가능성이 큼 -> 1.8 Nm로 감지 한계 대폭 완화
 FORCE_DETECTION_THRESHOLD = 1.8
-# 공구 파지 후 외력 감지 모니터링 대기 시간 (초) - 충분히 긴 시간으로 연장
-FORCE_MONITORING_TIMEOUT = 60.0
+# 공구 파지 후 작업자가 수령하기까지 기다리는 시간 (초)
+FORCE_MONITORING_TIMEOUT = 20.0
 
 # top-down(그리퍼가 아래를 보는) 자세 — YAW는 keypoint 축으로 매 탐지마다 계산해서 대체함
 GRASP_ROLL, GRASP_PITCH = math.pi, 0.0
@@ -341,12 +343,14 @@ class PickYoloTarget(Node):
         self.current_hand_pos = None
         self.create_subscription(Point, '/hand_position', self._hand_position_cb, 10)
         self.hmi_stop_requested = False
+        self.task_cancel_requested = False
         self._active_move_goal_handle = None
         self._active_execute_goal_handle = None
         self.create_subscription(String, '/hmi/emergency_stop', self._hmi_stop_cb, 10)
 
         # 현재 그리퍼에 부착된 도구 장애물 id (릴리즈 후 detach_object_from_gripper로 제거)
         self._attached_obj_id = None
+        self._tool_return_plan = None
 
         # /get_keyword 호출은 이제 백엔드(ros_bridge.py, HMI '음성 시작' 버튼)가 클라이언트로
         # 담당하고, 응답이 오면 이 토픽으로 "tool:target tool2:target2" 형식 메시지를 발행한다.
@@ -363,6 +367,7 @@ class PickYoloTarget(Node):
         self._collision_pub = self.create_publisher(CollisionObject, '/collision_object', 10)
         self._attached_collision_pub = self.create_publisher(AttachedCollisionObject, '/attached_collision_object', 10)
         self._hmi_alert_pub = self.create_publisher(String, '/hmi_alert', 10)
+        self._hmi_tool_task_status_pub = self.create_publisher(String, '/hmi/tool_task_status', 10)
 
         self.tf_buffer = tf2_ros.Buffer()
         # TransformListener 전용 노드를 분리하고 백그라운드 스레드에서 스핀하도록 설정 (콜백 큐 간섭 방지)
@@ -441,7 +446,19 @@ class PickYoloTarget(Node):
     def _hmi_stop_cb(self, msg):
         if msg.data == 'release':
             self.hmi_stop_requested = False
+            self.task_cancel_requested = False
             self.get_logger().info('HMI 긴급정지 해제 신호 수신.')
+            return
+        if msg.data == 'cancel':
+            self.task_cancel_requested = True
+            self._pending_tools_message = None
+            self.get_logger().warn('HMI 작업 취소 신호 수신 - 현재 MoveIt goal 취소 요청.')
+            for goal_handle in (self._active_move_goal_handle, self._active_execute_goal_handle):
+                if goal_handle is not None:
+                    try:
+                        goal_handle.cancel_goal_async()
+                    except Exception as e:
+                        self.get_logger().error(f'HMI 작업 취소 goal 취소 요청 실패: {e}')
             return
         self.hmi_stop_requested = True
         self._pending_tools_message = None
@@ -455,7 +472,7 @@ class PickYoloTarget(Node):
 
     def _spin_until_future_or_stop(self, future, goal_handle=None):
         while rclpy.ok() and not future.done():
-            if self.hmi_stop_requested:
+            if self.hmi_stop_requested or self.task_cancel_requested:
                 if goal_handle is not None:
                     try:
                         goal_handle.cancel_goal_async()
@@ -468,10 +485,61 @@ class PickYoloTarget(Node):
     def _sleep_or_stop(self, seconds: float) -> bool:
         deadline = time.monotonic() + seconds
         while rclpy.ok() and time.monotonic() < deadline:
-            if self.hmi_stop_requested:
+            if self.hmi_stop_requested or self.task_cancel_requested:
                 return False
             rclpy.spin_once(self, timeout_sec=min(0.05, max(0.0, deadline - time.monotonic())))
-        return not self.hmi_stop_requested
+        return not self.hmi_stop_requested and not self.task_cancel_requested
+
+    def _backend_static_root(self):
+        possible_paths = [
+            os.path.expanduser("~/ws_cobot2_pjt/backend"),
+            os.path.expanduser("~/cobot_ws/src/ws_cobot2_pjt/backend"),
+        ]
+        for path in possible_paths:
+            if os.path.exists(path):
+                return path
+        return possible_paths[0]
+
+    def _save_alert_image(self, prefix):
+        if self.color_frame is None:
+            return None
+        save_dir = os.path.join(self._backend_static_root(), "static", "inspection_images")
+        os.makedirs(save_dir, exist_ok=True)
+        filename = f"{prefix}_{int(time.time() * 1000)}.jpg"
+        path = os.path.join(save_dir, filename)
+        if cv2.imwrite(path, self.color_frame):
+            return f"/static/inspection_images/{filename}"
+        return None
+
+    def _publish_exception_alert(self, kind, title, message, image_url=None):
+        payload = {
+            "type": "alert",
+            "kind": kind,
+            "title": title,
+            "message": message,
+            "image_url": image_url,
+            "actions": [
+                {"label": "재검사", "command": "retry_tool", "variant": "primary"},
+                {"label": "작업 취소", "command": "cancel_task", "variant": "danger"},
+            ],
+        }
+        msg = String()
+        msg.data = json.dumps(payload, ensure_ascii=False)
+        self._hmi_alert_pub.publish(msg)
+
+    @staticmethod
+    def _format_tools_message(pairs):
+        return " ".join(f"{tool}:{target}" for tool, target in pairs)
+
+    def _publish_tool_task_status(self, state, message=None, retry_data=None):
+        payload = {"state": state}
+        if message:
+            payload["message"] = message
+        if retry_data:
+            payload["retry_data"] = retry_data
+        msg = String()
+        msg.data = json.dumps(payload, ensure_ascii=False)
+        self._hmi_tool_task_status_pub.publish(msg)
 
     @staticmethod
     def _angle_delta(a, b):
@@ -1337,16 +1405,11 @@ class PickYoloTarget(Node):
         )
 
     def wait_for_release(self, tool_name, target) -> bool:
-        """배송 위치 도착 후 그리퍼를 열 신호를 기다린다. 둘 중 먼저 오면 릴리즈:
-        1) hand_obstacle_publisher 기준 손 근접(15cm, 기존 로직)
-        2) HMI 확인/아니오 (/confirm_release) - confirmed=True일 때만 릴리즈.
-
-        키워드 추출 후 마이크가 반복 녹음되지 않도록 음성 예/아니오 확인은 사용하지 않는다.
-        """
+        """배송 위치 도착 후 손 근접을 기다린다. 20초 동안 수령이 없으면 원위치 복귀한다."""
         HAND_PROXIMITY_THRESHOLD = 0.15
 
         self.get_logger().info(
-            f"배송 완료 대기 시작 ({tool_name} -> {target}, 손 접근/HMI확인 중 먼저 오는 것 사용, "
+            f"배송 완료 대기 시작 ({tool_name} -> {target}, 손 접근 감지 대기, "
             f"제한시간: {FORCE_MONITORING_TIMEOUT}초)..."
         )
         start_time = self.get_clock().now()
@@ -1359,34 +1422,22 @@ class PickYoloTarget(Node):
                 return False
             rclpy.spin_once(self, timeout_sec=0.05)
 
-        release_req = ConfirmTools.Request()
-        release_req.tools = [tool_name]
-        release_req.targets = [target]
-        release_future = self._confirm_release_cli.call_async(release_req)
-
         while rclpy.ok():
             if self.hmi_stop_requested:
                 self.get_logger().warn('HMI 긴급정지로 배송 완료 대기를 중단합니다.')
                 return False
+            if self.task_cancel_requested:
+                self.get_logger().warn('HMI 작업 취소로 배송 완료 대기를 중단합니다.')
+                return 'cancel'
             current_time = self.get_clock().now()
             duration = (current_time - start_time).nanoseconds / 1e9
             if duration > FORCE_MONITORING_TIMEOUT:
-                self.get_logger().info("배송 완료 대기 제한시간 초과. 다음 단계로 진행합니다.")
-                return False
+                self.get_logger().info("배송 완료 대기 제한시간 초과. 도구를 원위치로 복귀합니다.")
+                return 'timeout'
 
             rclpy.spin_once(self, timeout_sec=0.01)
 
-            # 2) HMI 확인/아니오
-            if release_future.done():
-                result = release_future.result()
-                if result is not None and result.confirmed:
-                    self.get_logger().info("HMI 확인으로 그리퍼를 열어 공구를 전달합니다.")
-                    self.gripper_command('o')
-                    return True
-                # 아니오/응답없음이면 재요청해서 계속 대기 (한 번 소모됐으니 다시 물어봄)
-                release_future = self._confirm_release_cli.call_async(release_req)
-
-            # 1) 손 근접 (기존 로직)
+            # 손 근접
             if self.current_hand_pos is not None:
                 tcp_xyz = self.get_current_tcp_pose_tf()
                 if tcp_xyz is not None:
@@ -1402,9 +1453,44 @@ class PickYoloTarget(Node):
                         return True
 
             if not self._sleep_or_stop(0.1):
-                return False
+                return 'cancel' if self.task_cancel_requested else False
 
         return False
+
+    def return_held_tool_to_origin(self):
+        """수령 실패/작업 취소 시 픽업했던 실제 좌표로 되돌아가 도구를 내려놓는다."""
+        plan = self._tool_return_plan
+        if plan is None:
+            self.get_logger().warn('저장된 도구 원위치 복귀 정보가 없어 홈으로만 복귀합니다.')
+            return False
+
+        was_cancelled = self.task_cancel_requested
+        self.task_cancel_requested = False
+        try:
+            self.get_logger().info('도구 원위치 복귀 시작...')
+            if not self.move_to_joints(plan['pregrasp_joints']):
+                return False
+            if not self.move_cartesian_grasp(
+                plan['x'],
+                plan['y'],
+                plan['grasp_z'],
+                plan['yaw'],
+                seed_joints=plan['pregrasp_joints'],
+            ):
+                self.get_logger().warn('원위치 하강 실패 - 상공에서 그리퍼를 엽니다.')
+            if not self.gripper_command('o'):
+                return False
+            if self._attached_obj_id is not None:
+                self.detach_object_from_gripper(self._attached_obj_id)
+                self._attached_obj_id = None
+            if not self._sleep_or_stop(0.4):
+                return False
+            self.move_to_joints(plan['pregrasp_joints'])
+            self.get_logger().info('도구 원위치 복귀 완료')
+            return True
+        finally:
+            self._tool_return_plan = None
+            self.task_cancel_requested = was_cancelled
 
     def pick_detected_tool(self, detection, delivery_joints_deg) -> bool:
         """detect_once()가 찾은 대상 하나를 집어서 delivery_joints_deg 자세까지 옮긴다.
@@ -1626,6 +1712,13 @@ class PickYoloTarget(Node):
         # 그리퍼를 닫은 후, 월드(base_link)에 있던 장애물을 그리퍼 프레임으로 리어태치
         self.attach_object_to_gripper(obj_id, mesh_msg, gripper_position, gripper_quat)
         self._attached_obj_id = obj_id  # wait_for_release 성공 후 detach_object_from_gripper에 사용
+        self._tool_return_plan = {
+            'x': x,
+            'y': y,
+            'grasp_z': grasp_target_z,
+            'yaw': yaw,
+            'pregrasp_joints': list(pregrasp_joints),
+        }
         if not self._sleep_or_stop(0.5):
             return False
         if not self.move_to_joints(pregrasp_joints):
@@ -1634,6 +1727,7 @@ class PickYoloTarget(Node):
         return self.move_to_joints([math.radians(d) for d in delivery_joints_deg])
 
     def _pick_task_tools_cb(self, msg):
+        self.task_cancel_requested = False
         self._pending_tools_message = msg.data
 
     def run(self):
@@ -1658,6 +1752,7 @@ class PickYoloTarget(Node):
         if self.hmi_stop_requested:
             self.get_logger().warn('HMI 긴급정지 상태라 픽업 작업을 시작하지 않습니다.')
             return
+        self.task_cancel_requested = False
         self.get_logger().info('홈 자세로 이동 중...')
         if not self.move_to_joints([math.radians(d) for d in HOME_JOINTS_DEG]):
             return
@@ -1675,7 +1770,12 @@ class PickYoloTarget(Node):
             self.get_logger().info('가져올 도구 없음 (기본형 등). 작업을 종료합니다.')
             return
 
-        for tool_name, target in pairs:
+        keep_status_for_retry = False
+        cancelled_or_failed = False
+        self._publish_tool_task_status("active", "도구 전달 진행 중", self._format_tools_message(pairs))
+
+        for index, (tool_name, target) in enumerate(pairs):
+            remaining_tools_message = self._format_tools_message(pairs[index:])
             if self.hmi_stop_requested:
                 self.get_logger().warn('HMI 긴급정지로 남은 도구 배송을 중단합니다.')
                 break
@@ -1684,6 +1784,11 @@ class PickYoloTarget(Node):
                 self.get_logger().error(f'알 수 없는 도구 이름: {tool_name} - 건너뜀')
                 continue
 
+            self._publish_tool_task_status(
+                "active",
+                f"{tool_name} 전달 진행 중",
+                remaining_tools_message,
+            )
             self.get_logger().info(f'[{tool_name} -> {target}] 스캔 위치로 이동 중...')
             if not self.move_to_joints([math.radians(d) for d in TOOL_SCAN_JOINTS_DEG]):
                 break
@@ -1692,33 +1797,55 @@ class PickYoloTarget(Node):
             detection = self.detect_once(target_class=class_name)
             if detection is None:
                 self.get_logger().error("도구를 발견하지 못했습니다")
-                msg = String()
-                msg.data = "도구를 발견하지 못했습니다"
-                self._hmi_alert_pub.publish(msg)
+                image_url = self._save_alert_image("tool_missing")
+                self._publish_tool_task_status(
+                    "waiting_retry",
+                    f"{tool_name} 미검출 - 재검사 대기",
+                    remaining_tools_message,
+                )
+                self._publish_exception_alert(
+                    "tool_missing",
+                    "도구 미검출",
+                    f"{tool_name} 도구를 찾지 못했습니다. 도구 위치를 확인한 뒤 재검사하거나 작업을 취소하세요.",
+                    image_url,
+                )
+                keep_status_for_retry = True
                 
                 # 툴 탐지 실패 시 조인트값 기준 0,0,90,0,90,0의 위치로 이동
                 self.move_to_joints([math.radians(d) for d in [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]])
-                continue
+                break
 
             delivery_joints_deg = TOOL_DELIVERY_JOINTS_DEG.get(class_name, TOOL_SCAN_JOINTS_DEG)
             if not self.pick_detected_tool(detection, delivery_joints_deg):
-                self.get_logger().error(f'{tool_name} pick/배송 실패 - 다음 도구로 진행')
-                continue
+                self.get_logger().error(f'{tool_name} pick/배송 실패 - 도구 전달 작업을 취소합니다.')
+                self._publish_tool_task_status("cancelled", "도구 전달 취소")
+                cancelled_or_failed = True
+                break
 
-            # [HRI 비전 손 감지 + HMI/음성 확인 연동]: 배송 위치에서 정지 대기 상태로
-            # 손 근접/HMI 확인/음성 확인 중 먼저 오는 것으로 그리퍼를 열어 전달함
+            # 배송 위치에서 손 근접을 기다린 뒤 그리퍼를 열어 전달한다.
             released = self.wait_for_release(tool_name, target)
-            if released:
+            if released in ('timeout', 'cancel'):
+                self.get_logger().info(f'{tool_name} 수령 실패/취소 - 도구를 원위치로 복귀합니다.')
+                self.return_held_tool_to_origin()
+                self._publish_tool_task_status("cancelled", "도구 전달 취소")
+                cancelled_or_failed = True
+                if released == 'cancel':
+                    self.task_cancel_requested = False
+                break
+            elif released:
                 self.get_logger().info(f'{tool_name} 전달 완료.')
                 if self._attached_obj_id is not None:
                     self.detach_object_from_gripper(self._attached_obj_id)
                     self._attached_obj_id = None
             else:
-                self.get_logger().info(f'{tool_name} 릴리즈 대기 종료 (제한시간 초과).')
+                self.get_logger().info(f'{tool_name} 릴리즈 대기 종료.')
 
             self.clear_hand_obstacle()
 
-        self.get_logger().info('모든 도구 배송 완료. 홈으로 복귀합니다.')
+        if not keep_status_for_retry and not cancelled_or_failed:
+            self._publish_tool_task_status("idle", "도구 전달 완료")
+
+        self.get_logger().info('도구 배송 루틴 종료. 홈으로 복귀합니다.')
         if not self.hmi_stop_requested:
             self.move_to_joints([math.radians(d) for d in HOME_JOINTS_DEG])
 

@@ -8,6 +8,7 @@ import { InventoryPage } from './pages/InventoryPage'
 import { RobotDashboardPage } from './pages/RobotDashboardPage'
 import { WorkSessionPage } from './pages/WorkSessionPage'
 import { QcPage } from './pages/QcPage'
+import { HmiAlertModal } from './components/HmiAlertModal'
 import './App.css'
 
 type Screen = 'home' | 'inventory' | 'qc' | 'robot' | 'work' | 'users'
@@ -70,6 +71,7 @@ function App() {
         {screen === 'work' && <WorkSessionPage />}
         {screen === 'users' && canManage && <UsersPanel />}
       </div>
+      <HmiAlertModal />
     </div>
   )
 }

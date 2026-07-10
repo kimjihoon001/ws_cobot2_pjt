@@ -131,6 +131,9 @@ class VoiceBridgeNode(Node):
         self._hmi_stop_pub = self.create_publisher(String, "hmi/emergency_stop", 10)
         self._display_trajectory_pub = self.create_publisher(DisplayTrajectory, "/display_planned_path", 10)
         self._hmi_alert_sub = self.create_subscription(String, "hmi_alert", self._hmi_alert_cb, 10, callback_group=cb_group)
+        self._hmi_tool_task_status_sub = self.create_subscription(
+            String, "hmi/tool_task_status", self._hmi_tool_task_status_cb, 10, callback_group=cb_group
+        )
         for topic in ("/joint_states", "/dsr01/joint_states", "/dsr01/gz/joint_states", "/gripper_joint_states"):
             self.create_subscription(JointState, topic, self._handle_joint_state, 10, callback_group=cb_group)
         self.create_subscription(OnRobotRGInput, "/OnRobotRGInput", self._handle_gripper_status, 10, callback_group=cb_group)
@@ -138,6 +141,8 @@ class VoiceBridgeNode(Node):
         self._hmi_get_keyword_in_flight = False
         self._last_pick_task_data = ""
         self._last_pick_task_at = 0.0
+        self._tool_task_active = False
+        self._tool_task_status_message = ""
         self.get_logger().info("VoiceBridgeNode 준비 완료 (confirm_tools/confirm_release 서비스 대기 중)")
 
     def _handle_joint_state(self, msg: JointState):
@@ -211,11 +216,41 @@ class VoiceBridgeNode(Node):
             return False
         if not self._jenga_inspection_cli.service_is_ready():
             return False
+        release_msg = String()
+        release_msg.data = "release"
+        for _ in range(3):
+            self._hmi_stop_pub.publish(release_msg)
+        time.sleep(0.1)
         self._jenga_inspection_running = True
         future = self._jenga_inspection_cli.call_async(Trigger.Request())
         future.add_done_callback(self._on_jenga_inspection_done)
         self.get_logger().info("HMI 직접 실행으로 젠가 품질 검사를 시작했습니다.")
         return True
+
+    def retry_last_pick_task(self) -> dict:
+        if self._estop_active:
+            return {"success": False, "message": "비상정지 상태에서는 재검사를 실행할 수 없습니다."}
+        if not self._last_pick_task_data:
+            return {"success": False, "message": "재검사할 도구 작업이 없습니다."}
+        self._last_pick_task_at = 0.0
+        self._tool_task_active = True
+        self._tool_task_status_message = "도구 재검사 진행 중"
+        self._publish_pick_task_data(self._last_pick_task_data, "hmi_retry")
+        return {"success": True, "message": "도구 재검사를 시작했습니다."}
+
+    def cancel_task(self) -> dict:
+        self._jenga_inspection_running = False
+        self._hmi_get_keyword_in_flight = False
+        self._pending = None
+        self._pending_release = None
+        self._tool_task_active = False
+        self._tool_task_status_message = ""
+        self._last_pick_task_at = 0.0
+        cancel_msg = String()
+        cancel_msg.data = "cancel"
+        for _ in range(3):
+            self._hmi_stop_pub.publish(cancel_msg)
+        return {"success": True, "message": "작업 취소 및 홈 복귀를 요청했습니다."}
 
     def deliver_hammer_screwdriver(self) -> bool:
         """HMI 직접 실행 버튼. 음성 명령 없이 hammer/screwdriver 전달 작업을 시작한다."""
@@ -497,7 +532,14 @@ class VoiceBridgeNode(Node):
 
     def _broadcast_alert(self, msg: str):
         if _loop:
-            asyncio.run_coroutine_threadsafe(broadcast({"type": "alert", "message": msg}), _loop)
+            try:
+                payload = json.loads(msg)
+                if not isinstance(payload, dict):
+                    raise ValueError("alert payload must be an object")
+            except Exception:
+                payload = {"message": msg}
+            payload.setdefault("type", "alert")
+            asyncio.run_coroutine_threadsafe(broadcast(payload), _loop)
 
     def _on_jenga_inspection_done(self, future):
         try:
@@ -516,7 +558,6 @@ class VoiceBridgeNode(Node):
             self.get_logger().info(f"run_jenga_inspection 완료: {result.message}")
         else:
             self.get_logger().error(f"run_jenga_inspection 실패: {result.message}")
-            self._broadcast_alert(f"검사 실패: {result.message}")
         self._jenga_inspection_running = False
 
     def _start_pending(self, kind: str, tools, targets) -> dict:
@@ -643,11 +684,29 @@ class VoiceBridgeNode(Node):
         return self._pending_release["payload"] if self._pending_release else None
 
     def _hmi_alert_cb(self, msg: String):
-        if _loop:
-            asyncio.run_coroutine_threadsafe(
-                broadcast({"type": "alert", "message": msg.data}),
-                _loop,
-            )
+        self._broadcast_alert(msg.data)
+
+    def _hmi_tool_task_status_cb(self, msg: String):
+        try:
+            payload = json.loads(msg.data)
+            if not isinstance(payload, dict):
+                raise ValueError("tool task status payload must be an object")
+        except Exception:
+            payload = {"state": msg.data}
+
+        retry_data = payload.get("retry_data")
+        if isinstance(retry_data, str) and retry_data.strip():
+            self._last_pick_task_data = retry_data.strip()
+            self._last_pick_task_at = 0.0
+
+        state = str(payload.get("state", "")).lower()
+        if state in {"active", "running", "waiting_retry"}:
+            self._tool_task_active = True
+            self._tool_task_status_message = payload.get("message") or "도구 전달 진행 중"
+        elif state in {"idle", "done", "cancelled", "failed"}:
+            self._tool_task_active = False
+            self._tool_task_status_message = ""
+            self._last_pick_task_at = 0.0
 
     def _is_conveyor_available(self) -> bool:
         try:
@@ -709,6 +768,9 @@ class VoiceBridgeNode(Node):
         elif self._hmi_get_keyword_in_flight:
             current_task = "음성 명령 대기"
             task_key = "voice_listening"
+        elif self._tool_task_active:
+            current_task = self._tool_task_status_message or "도구 전달 진행 중"
+            task_key = "tool_delivery"
         elif time.monotonic() - self._last_pick_task_at < 20.0:
             current_task = "도구 전달 진행 중"
             task_key = "tool_delivery"

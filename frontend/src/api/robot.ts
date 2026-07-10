@@ -35,6 +35,11 @@ export interface RobotCommandResult {
   message: string
 }
 
+export interface RobotStartResult {
+  started: boolean
+  message: string
+}
+
 export function emergencyStop(): Promise<RobotCommandResult> {
   return request<RobotCommandResult>('/api/robot/emergency_stop', { method: 'POST' })
 }
@@ -53,4 +58,16 @@ export function openGripper(): Promise<RobotCommandResult> {
 
 export function closeGripper(): Promise<RobotCommandResult> {
   return request<RobotCommandResult>('/api/robot/close_gripper', { method: 'POST' })
+}
+
+export function runInspection(): Promise<RobotStartResult> {
+  return request<RobotStartResult>('/api/robot/run_inspection', { method: 'POST' })
+}
+
+export function retryPickTask(): Promise<RobotCommandResult> {
+  return request<RobotCommandResult>('/api/robot/retry_pick_task', { method: 'POST' })
+}
+
+export function cancelTask(): Promise<RobotCommandResult> {
+  return request<RobotCommandResult>('/api/robot/cancel_task', { method: 'POST' })
 }
