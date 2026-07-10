@@ -17,6 +17,7 @@ def robot_status():
             "checks": {
                 "dsr": False,
                 "moveit": False,
+                "conveyor": False,
                 "jenga_inspector": False,
                 "tool_pick": False,
                 "voice": False,
@@ -68,6 +69,30 @@ def deliver_hammer_screwdriver():
     """HMI 직접 실행 버튼 -> 음성 명령 없이 hammer/screwdriver 전달을 시작한다."""
     started = ros_bridge._bridge.deliver_hammer_screwdriver() if ros_bridge._bridge else False
     return {"started": started}
+
+
+@router.post("/move_home")
+def move_home():
+    """HMI 수동 제어 -> 기본 홈 위치(JReady) 이동."""
+    if not ros_bridge._bridge:
+        return {"success": False, "message": "ROS 브릿지 미연결"}
+    return ros_bridge._bridge.move_home()
+
+
+@router.post("/open_gripper")
+def open_gripper():
+    """HMI 수동 제어 -> OnRobot RG2 열기."""
+    if not ros_bridge._bridge:
+        return {"success": False, "message": "ROS 브릿지 미연결"}
+    return ros_bridge._bridge.open_gripper()
+
+
+@router.post("/close_gripper")
+def close_gripper():
+    """HMI 수동 제어 -> OnRobot RG2 닫기."""
+    if not ros_bridge._bridge:
+        return {"success": False, "message": "ROS 브릿지 미연결"}
+    return ros_bridge._bridge.close_gripper()
 
 
 @router.post("/emergency_stop")

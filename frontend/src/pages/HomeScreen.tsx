@@ -5,6 +5,7 @@ import type { Summary } from '../types/resource'
 import type { QcSummary } from '../types/qc'
 import { VoiceStartButton } from '../components/VoiceStartButton'
 import { DirectRobotActionButtons } from '../components/DirectRobotActionButtons'
+import { EmergencyStopButtons } from '../components/EmergencyStopButtons'
 import { useRobotStatus } from '../hooks/useRobotStatus'
 
 type Screen = 'inventory' | 'qc' | 'robot' | 'work' | 'users'
@@ -43,6 +44,7 @@ export function HomeScreen({
         <div className="home-action-row">
           <VoiceStartButton />
           <DirectRobotActionButtons />
+          <EmergencyStopButtons />
         </div>
       </div>
 

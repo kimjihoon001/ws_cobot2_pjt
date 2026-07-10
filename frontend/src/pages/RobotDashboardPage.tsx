@@ -6,6 +6,7 @@ type SubTab = 'connection' | 'safety'
 const CHECK_LABELS = {
   dsr: 'Doosan 제어기',
   moveit: 'MoveIt',
+  conveyor: '컨베이어벨트',
   jenga_inspector: '품질검사 노드',
   tool_pick: '공구 전달 노드',
   voice: '음성 노드',

@@ -3,6 +3,7 @@ import { request } from './client'
 export interface RobotChecks {
   dsr: boolean
   moveit: boolean
+  conveyor: boolean
   jenga_inspector: boolean
   tool_pick: boolean
   voice: boolean
@@ -40,4 +41,16 @@ export function emergencyStop(): Promise<RobotCommandResult> {
 
 export function releaseEstop(): Promise<RobotCommandResult> {
   return request<RobotCommandResult>('/api/robot/release_estop', { method: 'POST' })
+}
+
+export function moveHome(): Promise<RobotCommandResult> {
+  return request<RobotCommandResult>('/api/robot/move_home', { method: 'POST' })
+}
+
+export function openGripper(): Promise<RobotCommandResult> {
+  return request<RobotCommandResult>('/api/robot/open_gripper', { method: 'POST' })
+}
+
+export function closeGripper(): Promise<RobotCommandResult> {
+  return request<RobotCommandResult>('/api/robot/close_gripper', { method: 'POST' })
 }

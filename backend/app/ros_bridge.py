@@ -9,6 +9,8 @@ A_2 프로젝트(~/ws_cobot_pjt_pj/A_2/backend/main.py)의 BridgeNode/_ros_spin/
 """
 
 import asyncio
+import glob
+import os
 import json
 import logging
 import math
@@ -18,10 +20,13 @@ from datetime import datetime, timezone
 
 import rclpy
 from rclpy.action import get_action_names_and_types
+from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import ReentrantCallbackGroup
 from action_msgs.srv import CancelGoal
+from builtin_interfaces.msg import Duration as RosDuration
+from control_msgs.action import FollowJointTrajectory
 from controller_manager_msgs.srv import SwitchController
 from moveit_msgs.msg import DisplayTrajectory
 from sensor_msgs.msg import JointState
@@ -30,12 +35,18 @@ from std_srvs.srv import Trigger
 from dsr_msgs2.srv import GetRobotState, MoveStop, ServoOff, SetRobotControl
 from od_msg.srv import ConfirmTools
 from onrobot_rg_msgs.msg import OnRobotRGInput
+from onrobot_rg_msgs.srv import SetCommand
+from trajectory_msgs.msg import JointTrajectoryPoint
 
 from .database import SessionLocal
 from .models import VoiceConfirmRequest
 
 log = logging.getLogger("ros_bridge")
 ESTOP_STATES = {3, 5, 6, 10}  # SAFE_OFF, SAFE_STOP, EMERGENCY_STOP, SAFE_OFF2
+ARDUINO_VID = 0x2341
+CONVEYOR_DEFAULT_PORT = "/dev/ttyACM0"
+HOME_JOINTS_DEG = [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]
+ROBOT_JOINT_NAMES = [f"joint_{i}" for i in range(1, 7)]
 
 _clients: set = set()                     # 지금 연결된 웹소켓들
 _loop: asyncio.AbstractEventLoop = None    # ROS2 스레드에서 웹소켓으로 보낼 때 필요한 asyncio 루프
@@ -108,6 +119,13 @@ class VoiceBridgeNode(Node):
         )
         self._get_robot_state_cli = self.create_client(
             GetRobotState, "/dsr01/system/get_robot_state", callback_group=cb_group
+        )
+        self._gripper_command_cli = self.create_client(SetCommand, "/onrobot/sendCommand", callback_group=cb_group)
+        self._joint_trajectory_action = ActionClient(
+            self,
+            FollowJointTrajectory,
+            "/dsr01/dsr_moveit_controller/follow_joint_trajectory",
+            callback_group=cb_group,
         )
         self._pick_task_pub = self.create_publisher(String, "pick_task_tools", 10)
         self._hmi_stop_pub = self.create_publisher(String, "hmi/emergency_stop", 10)
@@ -204,6 +222,78 @@ class VoiceBridgeNode(Node):
             return False
         self._publish_pick_task_data("hammer:user screwdriver:user", "hmi_direct")
         return True
+
+    def move_home(self) -> dict:
+        """HMI 수동 제어: MoveIt 실행 컨트롤러로 기본 JReady 홈 자세에 보낸다."""
+        if self._estop_active:
+            return {"success": False, "message": "비상정지 상태에서는 홈 위치 이동을 실행할 수 없습니다."}
+        positions = [math.radians(value) for value in HOME_JOINTS_DEG]
+        return self._send_joint_trajectory(positions, duration_sec=5, label="홈 위치 이동")
+
+    def open_gripper(self) -> dict:
+        return self._send_gripper_command("o", "그리퍼 열기")
+
+    def close_gripper(self) -> dict:
+        return self._send_gripper_command("c", "그리퍼 닫기")
+
+    def _send_gripper_command(self, command: str, label: str) -> dict:
+        if self._estop_active:
+            return {"success": False, "message": f"비상정지 상태에서는 {label}를 실행할 수 없습니다."}
+        req = SetCommand.Request()
+        req.command = command
+        result = self._call_dsr_service(self._gripper_command_cli, req, label, timeout=2.0)
+        if result["success"]:
+            return {"success": True, "message": f"{label} 명령을 보냈습니다."}
+        return self._public_service_result(result)
+
+    def _send_joint_trajectory(self, positions: list[float], duration_sec: int, label: str) -> dict:
+        if not self._joint_trajectory_action.wait_for_server(timeout_sec=1.0):
+            return {"success": False, "message": "로봇 궤적 컨트롤러가 응답하지 않습니다."}
+
+        goal = FollowJointTrajectory.Goal()
+        goal.trajectory.joint_names = ROBOT_JOINT_NAMES
+        point = JointTrajectoryPoint()
+        point.positions = positions
+        point.velocities = [0.0] * len(positions)
+        point.time_from_start = RosDuration(sec=duration_sec)
+        goal.trajectory.points = [point]
+
+        done = threading.Event()
+        result_box = {"accepted": False, "error_code": None, "error": None}
+        send_future = self._joint_trajectory_action.send_goal_async(goal)
+
+        def _goal_response(done_future):
+            try:
+                goal_handle = done_future.result()
+                if not goal_handle.accepted:
+                    done.set()
+                    return
+                result_box["accepted"] = True
+                result_future = goal_handle.get_result_async()
+
+                def _result(result_done_future):
+                    try:
+                        result_box["error_code"] = result_done_future.result().result.error_code
+                    except Exception as exc:
+                        result_box["error"] = exc
+                    finally:
+                        done.set()
+
+                result_future.add_done_callback(_result)
+            except Exception as exc:
+                result_box["error"] = exc
+                done.set()
+
+        send_future.add_done_callback(_goal_response)
+        if not done.wait(timeout=duration_sec + 3.0):
+            return {"success": False, "message": f"{label} 응답 타임아웃"}
+        if result_box["error"] is not None:
+            return {"success": False, "message": f"{label} 실패: {result_box['error']}"}
+        if not result_box["accepted"]:
+            return {"success": False, "message": f"{label} 목표가 거부되었습니다."}
+        if result_box["error_code"] != 0:
+            return {"success": False, "message": f"{label} 실패(error_code={result_box['error_code']})"}
+        return {"success": True, "message": f"{label} 완료"}
 
     def _call_dsr_service(self, client, request, label: str, timeout: float = 2.0) -> dict:
         if not client.wait_for_service(timeout_sec=timeout):
@@ -542,6 +632,17 @@ class VoiceBridgeNode(Node):
     def get_pending_release_payload(self):
         return self._pending_release["payload"] if self._pending_release else None
 
+    def _is_conveyor_available(self) -> bool:
+        try:
+            import serial.tools.list_ports
+
+            for port in serial.tools.list_ports.comports():
+                if port.vid == ARDUINO_VID:
+                    return True
+        except Exception:
+            pass
+        return os.path.exists(CONVEYOR_DEFAULT_PORT) or bool(glob.glob("/dev/ttyACM*") or glob.glob("/dev/ttyUSB*"))
+
     def get_robot_status(self) -> dict:
         service_names = set()
         action_names = set()
@@ -561,6 +662,7 @@ class VoiceBridgeNode(Node):
         checks = {
             "dsr": "/dsr01/system/get_robot_state" in service_names,
             "moveit": moveit_available,
+            "conveyor": self._is_conveyor_available(),
             "jenga_inspector": "/run_jenga_inspection" in service_names,
             "tool_pick": self.count_subscribers("pick_task_tools") > 0,
             "voice": "get_keyword" in service_names or "/get_keyword" in service_names,

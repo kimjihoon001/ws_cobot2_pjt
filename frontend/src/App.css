@@ -667,6 +667,7 @@
   align-items: flex-start;
   gap: 10px;
   margin-top: 16px;
+  width: 100%;
 }
 
 .voice-btn {
@@ -746,6 +747,54 @@
 .direct-action-btn-error {
   border-color: var(--status-critical);
   color: var(--status-critical);
+}
+
+.direct-action-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.emergency-actions {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.emergency-stop-btn {
+  border-color: var(--status-critical);
+  background: var(--status-critical);
+  color: #fff;
+  min-width: 190px;
+  min-height: 62px;
+  justify-content: center;
+  padding: 18px 30px;
+  font-size: 18px;
+}
+
+.emergency-stop-btn:hover {
+  border-color: var(--status-critical);
+  color: #fff;
+}
+
+.emergency-release-btn {
+  border-color: var(--status-good);
+  color: var(--status-good);
+  min-width: 190px;
+  min-height: 62px;
+  justify-content: center;
+  padding: 18px 30px;
+  font-size: 18px;
+}
+
+.emergency-action-message {
+  max-width: 220px;
+  margin: -4px 0 0 auto;
+  font-size: 12px;
+  text-align: right;
+  color: var(--text-secondary);
 }
 
 @keyframes voice-pulse {

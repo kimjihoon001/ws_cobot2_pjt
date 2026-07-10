@@ -15,16 +15,15 @@ const JOINTS = [
 ]
 
 const CONTROL_BUTTONS = [
-  { label: '홈 위치 이동', variant: 'accent', action: undefined },
-  { label: '일시정지', variant: 'warning', action: undefined },
-  { label: '비상해제', variant: 'good', action: 'release_estop' },
+  { label: '홈 위치 이동', variant: 'accent', action: 'move_home' },
+  { label: '비상정지 해제', variant: 'good', action: 'release_estop' },
   { label: '비상정지', variant: 'critical-solid', action: 'emergency_stop' },
-  { label: '그리퍼 열기', variant: 'accent', action: undefined },
-  { label: '그리퍼 닫기', variant: 'accent', action: undefined },
+  { label: '그리퍼 열기', variant: 'accent', action: 'open_gripper' },
+  { label: '그리퍼 닫기', variant: 'accent', action: 'close_gripper' },
 ] as const
 
 export function WorkSessionPage() {
-  const { connected, pending, pendingRelease, respond, respondRelease } = useVoiceBridge()
+  const { connected, pending, respond } = useVoiceBridge()
   const robotStatus = useRobotStatus()
   const [robotCommandMessage, setRobotCommandMessage] = useState('')
   const [robotCommandRunning, setRobotCommandRunning] = useState<string | null>(null)
@@ -40,14 +39,21 @@ export function WorkSessionPage() {
     setRobotCommandRunning(action)
     setRobotCommandMessage('')
     try {
-      const result =
-        action === 'emergency_stop' ? await robotApi.emergencyStop() : await robotApi.releaseEstop()
+      const result = await runRobotCommand(action)
       setRobotCommandMessage(result.message)
     } catch (error) {
       setRobotCommandMessage(error instanceof Error ? error.message : '명령 실패')
     } finally {
       setRobotCommandRunning(null)
     }
+  }
+  const runRobotCommand = (action: string) => {
+    if (action === 'emergency_stop') return robotApi.emergencyStop()
+    if (action === 'release_estop') return robotApi.releaseEstop()
+    if (action === 'move_home') return robotApi.moveHome()
+    if (action === 'open_gripper') return robotApi.openGripper()
+    if (action === 'close_gripper') return robotApi.closeGripper()
+    throw new Error('지원하지 않는 명령입니다.')
   }
 
   return (
@@ -65,7 +71,7 @@ export function WorkSessionPage() {
             type="button"
             className={`control-btn control-btn-${variant}`}
             key={label}
-            disabled={!action || robotCommandRunning !== null || (action === 'release_estop' && !robotStatus.estop)}
+            disabled={robotCommandRunning !== null || (action === 'release_estop' && !robotStatus.estop)}
             onClick={() => void runControlAction(action)}
           >
             {robotCommandRunning === action ? '처리 중' : label}
@@ -114,26 +120,6 @@ export function WorkSessionPage() {
         </div>
       </div>
       <p className="empty-state">보이스 명령/ROS2 브릿지 연동 후 실제 작업 정보가 여기에 표시됩니다.</p>
-
-      {pendingRelease && (
-        <div className="task-status-row">
-          <div className="stat-tile stat-tile-large">
-            <div className="stat-tile-label">배송 확인</div>
-            <div className="stat-tile-value" style={{ fontSize: 22 }}>
-              도구를 받으셨나요? (
-              {pendingRelease.tools.map((t, i) => `${t} → ${pendingRelease.targets[i]}`).join(', ')})
-            </div>
-            <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-              <button type="button" className="primary-btn" onClick={() => respondRelease(true)}>
-                확인
-              </button>
-              <button type="button" className="text-btn" onClick={() => respondRelease(false)}>
-                아니오
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       <div className="task-status-row">
         <div className="stat-tile stat-tile-large">

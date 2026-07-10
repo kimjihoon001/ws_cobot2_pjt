@@ -11,6 +11,7 @@ const FALLBACK_STATUS: RobotStatus = {
   checks: {
     dsr: false,
     moveit: false,
+    conveyor: false,
     jenga_inspector: false,
     tool_pick: false,
     voice: false,
