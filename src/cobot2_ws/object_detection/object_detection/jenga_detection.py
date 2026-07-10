@@ -5,67 +5,20 @@ from collections import Counter
 
 import numpy as np
 import cv2
-import torch
 import rclpy
 from rclpy.node import Node
-from ament_index_python.packages import get_package_share_directory
-from ultralytics import YOLO
 
 from od_msg.srv import SrvDepthPosition
+from od_msg.srv import YoloInference
 from std_srvs.srv import Trigger
 from object_detection.realsense import ImgNode
-
-PACKAGE_NAME = "object_detection"
-PACKAGE_PATH = get_package_share_directory(PACKAGE_NAME)
-
-YOLO_MODEL_FILENAME = "bestjenga.onnx"
-YOLO_CLASS_NAME_JSON = "class_name_jenga.json"
-
-YOLO_MODEL_PATH = os.path.join(PACKAGE_PATH, "resource", YOLO_MODEL_FILENAME)
-YOLO_JSON_PATH = os.path.join(PACKAGE_PATH, "resource", YOLO_CLASS_NAME_JSON)
-
-
-class JengaYoloModel:
-    def __init__(self):
-        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        # Load Jenga ONNX model
-        self.model = YOLO(YOLO_MODEL_PATH, task='detect')
-        
-        with open(YOLO_JSON_PATH, "r", encoding="utf-8") as file:
-            class_dict = json.load(file)
-            # e.g., {"0": "entire", "1": "longhole", "2": "smallhole"}
-            self.reversed_class_dict = {v: int(k) for k, v in class_dict.items()}
-            self.class_names = {int(k): v for k, v in class_dict.items()}
-
-        print(f"Jenga YOLO model initialized on device: {self.device}")
-        print(f"Classes: {self.class_names}")
-
-    def get_detections(self, frame, confidence_threshold=0.5):
-        """Runs inference and returns all detections above confidence threshold."""
-        results = self.model(frame, device=self.device, verbose=False)
-        detections = []
-        if len(results) > 0:
-            res = results[0]
-            for box, score, label in zip(
-                res.boxes.xyxy.tolist(),
-                res.boxes.conf.tolist(),
-                res.boxes.cls.tolist(),
-            ):
-                if score >= confidence_threshold:
-                    detections.append({
-                        "box": box,
-                        "score": score,
-                        "label": int(label),
-                        "name": self.class_names.get(int(label), "unknown")
-                    })
-        return detections
 
 
 class JengaDetectionNode(Node):
     def __init__(self):
         super().__init__('jenga_detection_node')
         self.img_node = ImgNode()
-        self.model = JengaYoloModel()
+        self.yolo_client = self.create_client(YoloInference, '/vision/get_bboxes')
         self.intrinsics = self._wait_for_valid_data(
             self.img_node.get_camera_intrinsic, "camera intrinsics"
         )
@@ -83,6 +36,23 @@ class JengaDetectionNode(Node):
         )
         self.get_logger().info("JengaDetectionNode initialized and ready.")
 
+    def _get_detections_from_server(self, conf=0.5):
+        if not self.yolo_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().warn("Vision server not ready")
+            return []
+        req = YoloInference.Request()
+        req.model_name = 'jenga'
+        req.confidence_threshold = conf
+        future = self.yolo_client.call_async(req)
+        rclpy.spin_until_future_complete(self, future)
+        res = future.result()
+        if res and res.success:
+            try:
+                return json.loads(res.json_result)
+            except:
+                pass
+        return []
+
     def handle_detect_jenga_features(self, request, response):
         self.get_logger().info("Received request for Jenga feature detection.")
         for _ in range(5):
@@ -98,7 +68,7 @@ class JengaDetectionNode(Node):
         self.get_logger().info("!!! [IMAGE ROTATE 180] Rotating color frame by 180 degrees (ROTATE_180) !!!")
         color_frame = cv2.rotate(color_frame, cv2.ROTATE_180)
 
-        detections = self.model.get_detections(color_frame, confidence_threshold=0.5)
+        detections = self._get_detections_from_server(0.5)
         result_list = []
         
         # Draw bounding boxes on copy of the frame to save
@@ -168,8 +138,8 @@ class JengaDetectionNode(Node):
             self.get_logger().warn("Color or depth frame is not available.")
             return 0.0, 0.0, 0.0, 0.0
 
-        # Run YOLO inference
-        detections = self.model.get_detections(color_frame, confidence_threshold=0.5)
+        # Run inference via Vision Server
+        detections = self._get_detections_from_server(0.5)
         
         # Filter for the target (e.g. 'entire' or checking other features)
         target_detections = [d for d in detections if d["name"] == target]

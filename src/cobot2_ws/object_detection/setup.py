@@ -30,6 +30,7 @@ setup(
             'object_detection = object_detection.detection:main',
             'jenga_detection = object_detection.jenga_detection:main',
             'tool_obstacle_publisher = object_detection.tool_obstacle_publisher:main',
+            'unified_vision_server = object_detection.unified_vision_server:main',
         ],
     },
 )

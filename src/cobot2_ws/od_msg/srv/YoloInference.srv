@@ -1,0 +1,5 @@
+string model_name
+float32 confidence_threshold
+---
+bool success
+string json_result

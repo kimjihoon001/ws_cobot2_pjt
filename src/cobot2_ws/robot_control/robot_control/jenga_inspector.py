@@ -14,10 +14,7 @@ from scipy.spatial.transform import Rotation
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
-try:
-    from ultralytics import YOLO
-except ImportError:
-    pass
+from od_msg.srv import YoloInference
 
 from tf2_ros import Buffer, TransformListener
 from ament_index_python.packages import get_package_share_directory
@@ -107,6 +104,7 @@ DOOSAN_MOVE_STOP_SERVICE = f'/{ROBOT_ID}/motion/move_stop'
 class JengaInspectorNode(Node):
     def __init__(self):
         super().__init__("jenga_inspector")
+        self.yolo_client = self.create_client(YoloInference, '/vision/get_bboxes')
         self.package_path = get_package_share_directory("robot_control")
         self.init_database()
         
@@ -140,11 +138,6 @@ class JengaInspectorNode(Node):
         except Exception as e:
             self.get_logger().error(f"컨베이어 시리얼 연결 실패 - 컨베이어 이동 없이 진행: {e}")
 
-        model_path = os.path.join(workspace_path, 'src/yolov8_ws/model/best_3.onnx')
-        if not os.path.exists(model_path):
-            model_path = os.path.join(workspace_path, 'src/yolov8_ws/model/best_2.onnx')
-        self.model = YOLO(model_path, task='detect')
-        
         self.bridge = CvBridge()
         self.latest_image = None
         self.depth_frame = None
@@ -318,109 +311,110 @@ class JengaInspectorNode(Node):
         
         frame_results = []
         img_copy = self.latest_image.copy()
-        results = self.model(img_copy, conf=0.60, verbose=False)
         
-        if len(results) > 0:
-            res = results[0]
-            annotated_frame = res.plot()
+        # Service call for detection
+        detections = self._get_detections_from_server(0.60)
+        
+        # Visualization
+        annotated_frame = img_copy.copy()
+        for d in detections:
+            x1, y1, x2, y2 = d["box"]
+            cv2.rectangle(annotated_frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
             
-            # 이미지 저장 (백엔드 static 폴더)
-            possible_paths = [
-                os.path.expanduser("~/ws_cobot2_pjt/backend"),
-                os.path.expanduser("~/cobot_ws/src/ws_cobot2_pjt/backend")
-            ]
-            db_dir = possible_paths[0]
-            for p in possible_paths:
-                if os.path.exists(p):
-                    db_dir = p
-                    break
+        # 이미지 저장 (백엔드 static 폴더)
+        possible_paths = [
+            os.path.expanduser("~/ws_cobot2_pjt/backend"),
+            os.path.expanduser("~/cobot_ws/src/ws_cobot2_pjt/backend")
+        ]
+        db_dir = possible_paths[0]
+        for p in possible_paths:
+            if os.path.exists(p):
+                db_dir = p
+                break
+        
+        save_dir = os.path.join(db_dir, "static", "inspection_images")
+        os.makedirs(save_dir, exist_ok=True)
+        timestamp = int(time.time() * 1000)
+        img_filename = f"inspection_{face_name}_{pitch_deg}_{timestamp}.jpg"
+        filename = os.path.join(save_dir, img_filename)
+        image_saved = cv2.imwrite(filename, annotated_frame)
+        if not image_saved:
+            self.get_logger().error(f"검출 이미지 저장 실패: {filename}")
+        
+        if image_saved and abs(pitch_deg - 45.0) < 1.0:
+            self.current_inspection_images.append(f"/static/inspection_images/{img_filename}")
+        
+        try:
+            img_msg = self.bridge.cv2_to_imgmsg(annotated_frame, "bgr8")
+            self.image_pub.publish(img_msg)
+        except Exception:
+            pass
+        
+        entire_box = None
+        hole_boxes = []
+        
+        for d in detections:
+            cls_name = d["class_name"]
+            if cls_name == 'entire':
+                entire_box = d["box"]
+            elif cls_name.lower() == 'smallhole':
+                hole_boxes.append(d["box"])
+        
+        if entire_box is not None:
+            ex1, ey1, ex2, ey2 = entire_box
+            eu = int((ex1 + ex2) / 2)
+            ev = int((ey1 + ey2) / 2)
             
-            save_dir = os.path.join(db_dir, "static", "inspection_images")
-            os.makedirs(save_dir, exist_ok=True)
-            timestamp = int(time.time() * 1000)
-            img_filename = f"inspection_{face_name}_{pitch_deg}_{timestamp}.jpg"
-            filename = os.path.join(save_dir, img_filename)
-            image_saved = cv2.imwrite(filename, annotated_frame)
-            if not image_saved:
-                self.get_logger().error(f"검출 이미지 저장 실패: {filename}")
+            valid_entire_Z = float('inf')
+            valid_eu, valid_ev = eu, ev
             
-            if image_saved and abs(pitch_deg - 45.0) < 1.0:
-                self.current_inspection_images.append(f"/static/inspection_images/{img_filename}")
+            scan_ey_start = int(ey1) + 10
+            scan_ey_end = int(ey2) - 10
             
-            try:
-                img_msg = self.bridge.cv2_to_imgmsg(annotated_frame, "bgr8")
-                self.image_pub.publish(img_msg)
-            except Exception:
-                pass
+            for scan_v in range(scan_ey_start, scan_ey_end + 1, 5):
+                tu = np.clip(eu, 0, self.depth_frame.shape[1]-1)
+                tv = np.clip(scan_v, 0, self.depth_frame.shape[0]-1)
+                val = float(self.depth_frame[tv, tu])
+                if 0 < val < valid_entire_Z:
+                    valid_entire_Z = val
+                    valid_eu, valid_ev = tu, tv
             
-            names = res.names
-            entire_box = None
-            hole_boxes = []
-            
-            for box in res.boxes:
-                cls_name = names[int(box.cls[0])]
-                if cls_name == 'entire':
-                    entire_box = box
-                elif cls_name.lower() == 'smallhole':
-                    hole_boxes.append(box)
-            
-            if entire_box is not None:
-                ex1, ey1, ex2, ey2 = entire_box.xyxy[0].cpu().numpy()
-                eu = int((ex1 + ex2) / 2)
-                ev = int((ey1 + ey2) / 2)
-                
-                valid_entire_Z = float('inf')
-                valid_eu, valid_ev = eu, ev
-                
-                scan_ey_start = int(ey1) + 10
-                scan_ey_end = int(ey2) - 10
-                
-                for scan_v in range(scan_ey_start, scan_ey_end + 1, 5):
-                    tu = np.clip(eu, 0, self.depth_frame.shape[1]-1)
-                    tv = np.clip(scan_v, 0, self.depth_frame.shape[0]-1)
-                    val = float(self.depth_frame[tv, tu])
-                    if 0 < val < valid_entire_Z:
-                        valid_entire_Z = val
-                        valid_eu, valid_ev = tu, tv
-                
-                if valid_entire_Z != float('inf'):
-                    entire_v_depth = self.get_vertical_depth(valid_eu, valid_ev, valid_entire_Z, pitch_deg=pitch_deg)
-                    if entire_v_depth is not None:
-                        pitch = np.radians(pitch_deg)
-                        fx = self.intrinsics['fx']
-                        ppx = self.intrinsics['ppx']
+            if valid_entire_Z != float('inf'):
+                entire_v_depth = self.get_vertical_depth(valid_eu, valid_ev, valid_entire_Z, pitch_deg=pitch_deg)
+                if entire_v_depth is not None:
+                    pitch = np.radians(pitch_deg)
+                    fx = self.intrinsics['fx']
+                    ppx = self.intrinsics['ppx']
+                    
+                    X_ent_norm = (valid_eu - ppx) / fx
+                    K_horiz = valid_entire_Z * (np.sin(pitch) - X_ent_norm * np.cos(pitch))
+                    
+                    for hole in hole_boxes:
+                        x1, y1, x2, y2 = hole
+                        u = int((x1 + x2) / 2)
+                        v = int((y1 + y2) / 2)
                         
-                        X_ent_norm = (valid_eu - ppx) / fx
-                        K_horiz = valid_entire_Z * (np.sin(pitch) - X_ent_norm * np.cos(pitch))
-                        
-                        for box in hole_boxes:
-                            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                            u = int((x1 + x2) / 2)
-                            v = int((y1 + y2) / 2)
-                            
-                            X_hole_norm = (u - ppx) / fx
-                            denom = np.sin(pitch) - X_hole_norm * np.cos(pitch)
-                            if abs(denom) > 1e-6:
-                                Z_hole_true = K_horiz / denom
-                                obj_v_depth = self.get_vertical_depth(u, v, Z_hole_true, pitch_deg=pitch_deg)
-                                if obj_v_depth is not None:
-                                    # 84mm 젠가 타워의 정확한 중앙(entire_v_depth)을 기준점(42mm)으로 삼아 높이 역산
-                                    # 바운딩 박스(ex1)에 의존하지 않아 그림자 노이즈에 매우 강건함
-                                    height_from_base = 42.0 + (entire_v_depth - obj_v_depth)
-                                    compensated_height = height_from_base - 7.0
-                                    floor_num = max(1, int(round(compensated_height / 14.0)) + 1)
-                                    floor_num = min(6, floor_num)
+                        X_hole_norm = (u - ppx) / fx
+                        denom = np.sin(pitch) - X_hole_norm * np.cos(pitch)
+                        if abs(denom) > 1e-6:
+                            Z_hole_true = K_horiz / denom
+                            obj_v_depth = self.get_vertical_depth(u, v, Z_hole_true, pitch_deg=pitch_deg)
+                            if obj_v_depth is not None:
+                                height_from_base = 42.0 + (entire_v_depth - obj_v_depth)
+                                compensated_height = height_from_base - 7.0
+                                floor_num = max(1, int(round(compensated_height / 14.0)) + 1)
+                                floor_num = min(6, floor_num)
+                                
+                                tower_width = ey2 - ey1
+                                third = tower_width / 3.0
+                                if v < ey1 + third:
+                                    horiz_pos = "Left"
+                                elif v < ey1 + 2 * third:
+                                    horiz_pos = "Center"
+                                else:
+                                    horiz_pos = "Right"
                                     
-                                    tower_width = ey2 - ey1
-                                    third = tower_width / 3.0
-                                    if v < ey1 + third:
-                                        horiz_pos = "Left"
-                                    elif v < ey1 + 2 * third:
-                                        horiz_pos = "Center"
-                                    else:
-                                        horiz_pos = "Right"
-                                        
-                                    frame_results.append((floor_num, horiz_pos))
+                                frame_results.append((floor_num, horiz_pos))
         return frame_results
 
     def analyze_defects(self):
@@ -428,10 +422,7 @@ class JengaInspectorNode(Node):
         jenga_map = {floor: ["O", "O", "O"] for floor in range(6, 0, -1)}
         
         pos_to_idx = {"Left": 0, "Center": 1, "Right": 2}
-        mirror_pos = {"Left": "Right", "Center": "Center", "Right": "Left"}
         
-        # 방향에 상관없이 YOLO가 찾아낸 구멍을 거울 반전(Mirror) 없이 그대로 맵에 반영합니다.
-        # (양품 템플릿이 좌우 대칭이므로, 보는 방향에 따라 좌우가 뒤바뀌어도 무방하다는 사용자 요청)
         for face_id, data in self.inspection_data.items():
             for floor, pos in data:
                 if 1 <= floor <= 6:
@@ -473,9 +464,6 @@ class JengaInspectorNode(Node):
         """Processes hand position, filters by robot workspace ROI, and updates obstacle."""
         is_clear_signal = msg.z < -1.0
         
-        # 기존에 ROI가 좁아서 손이 경계에 있을 때 스크립트는 무시하고 MoveIt만 피해서 가는 문제 발생.
-        # 작업 공간 앞쪽 전체를 커버하도록 ROI를 대폭 확장합니다.
-        # X: 0cm ~ 80cm, Y: -60cm ~ 60cm, Z: -20cm ~ 80cm
         in_roi = False
         if not is_clear_signal:
             in_roi = (0.0 <= msg.x <= 0.80) and (-0.60 <= msg.y <= 0.60) and (-0.20 <= msg.z <= 0.80)
@@ -1142,8 +1130,12 @@ class JengaInspectorNode(Node):
             self.get_logger().warn("홈 top 사진 저장 실패 - 카메라 프레임이 아직 없습니다.")
             return None
         # YOLO 검출 결과를 프레임에 그려서 저장 (검출 없으면 원본 프레임)
-        results = self.model(self.latest_image.copy(), conf=0.60, verbose=False)
-        frame_to_save = results[0].plot() if len(results) > 0 else self.latest_image
+        frame_to_save = self.latest_image.copy()
+        detections = self._get_detections_from_server(0.60)
+        for d in detections:
+            x1, y1, x2, y2 = d["box"]
+            cv2.rectangle(frame_to_save, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+            
         possible_paths = [
             os.path.expanduser("~/ws_cobot2_pjt/backend"),
             os.path.expanduser("~/cobot_ws/src/ws_cobot2_pjt/backend"),
@@ -1262,6 +1254,48 @@ class JengaInspectorNode(Node):
             time.sleep(0.1)
         self.hmi_cancel_requested = False
         return response
+
+    def _get_detections_from_server(self, conf=0.60):
+        if not self.yolo_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().warn("Vision server not ready")
+            return []
+        req = YoloInference.Request()
+        req.model_name = 'inspector'
+        req.confidence_threshold = conf
+        future = self.yolo_client.call_async(req)
+        rclpy.spin_until_future_complete(self, future)
+        res = future.result()
+        if res and res.success:
+            try:
+                return json.loads(res.json_result)
+            except:
+                pass
+        return []
+
+    def save_error_image(self, error_type: str) -> str:
+        """에러 상황의 이미지를 저장하고 상대 경로(URL)를 반환한다."""
+        if self.latest_image is None:
+            return ""
+        frame_to_save = self.latest_image.copy()
+        detections = self._get_detections_from_server(0.60)
+        for d in detections:
+            x1, y1, x2, y2 = d["box"]
+            cv2.rectangle(frame_to_save, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+        possible_paths = [
+            os.path.expanduser("~/ws_cobot2_pjt/backend"),
+            os.path.expanduser("~/cobot_ws/src/ws_cobot2_pjt/backend")
+        ]
+        db_dir = possible_paths[0]
+        for p in possible_paths:
+            if os.path.exists(p):
+                db_dir = p
+                break
+        save_dir = os.path.join(db_dir, "static", "inspection_images")
+        os.makedirs(save_dir, exist_ok=True)
+        timestamp = int(time.time() * 1000)
+        filename = os.path.join(save_dir, f"error_{error_type}_{timestamp}.jpg")
+        cv2.imwrite(filename, frame_to_save)
+        return f"/static/inspection_images/error_{error_type}_{timestamp}.jpg"
 
     def _run_inspection_thread(self, request, response):
         """Background thread executing the Jenga inspection and scanning sequence."""

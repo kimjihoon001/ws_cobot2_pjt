@@ -23,8 +23,10 @@ from shape_msgs.msg import SolidPrimitive, Mesh, MeshTriangle
 from geometry_msgs.msg import Pose, PoseStamped, Point
 from sensor_msgs.msg import Image, CameraInfo, JointState
 from std_msgs.msg import String
+from ament_index_python.packages import get_package_share_directory
+from od_msg.srv import ConfirmTools
+from od_msg.srv import YoloInference
 from cv_bridge import CvBridge
-from ultralytics import YOLO
 
 import tf2_ros
 from tf2_geometry_msgs import do_transform_pose
@@ -321,12 +323,11 @@ class PickYoloTarget(Node):
 
         self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
         self.get_logger().info(f'YOLO device: {self.device}')
-        self.model = YOLO(MODEL_PATH)
-        self.model.to(self.device)
+        self.yolo_client = self.create_client(YoloInference, '/vision/get_bboxes')
 
         self.color_frame = None
         self.depth_frame = None
-        self.intrinsics = None
+        self.camera_intrinsics = None
         self.camera_frame_id = None
         self.current_joint6 = None
         self.current_gripper_finger_joint = None
@@ -415,6 +416,77 @@ class PickYoloTarget(Node):
 
         self.get_logger().info('준비 완료')
 
+    def detect_once(self, target_class=None, timeout_sec=DETECT_TIMEOUT_SEC):
+        start_time = time.time()
+        while time.time() - start_time < timeout_sec:
+            # depth/intrinsics 대기
+            while getattr(self, 'depth_frame', None) is None or self.camera_intrinsics is None:
+                rclpy.spin_once(self, timeout_sec=0.01)
+                if time.time() - start_time > timeout_sec:
+                    return None
+            
+            # 서버 호출
+            if not self.yolo_client.wait_for_service(timeout_sec=1.0):
+                self.get_logger().warn("Vision server not ready...")
+                continue
+                
+            req = YoloInference.Request()
+            req.model_name = 'tool'
+            req.confidence_threshold = 0.5
+            
+            future = self.yolo_client.call_async(req)
+            rclpy.spin_until_future_complete(self, future)
+            res = future.result()
+            
+            if res and res.success:
+                try:
+                    detections = json.loads(res.json_result)
+                except Exception as e:
+                    self.get_logger().error(f"Failed to parse vision server response: {e}")
+                    detections = []
+            else:
+                detections = []
+                
+            if len(detections) > 0:
+                # target_class 필터링
+                if target_class:
+                    valid_dets = [d for d in detections if d["name"] == target_class]
+                else:
+                    valid_dets = detections
+                    
+                if valid_dets:
+                    best_det = max(valid_dets, key=lambda x: x["score"])
+                    # best_det["box"] -> [x1, y1, x2, y2]
+                    return best_det
+            
+            rclpy.spin_once(self, timeout_sec=0.1)
+        
+        return None
+
+    def save_error_image(self, error_type: str) -> str:
+        if getattr(self, 'color_frame', None) is None:
+            return ""
+        frame_to_save = self.color_frame.copy()
+        import cv2
+        import os
+        import time
+        possible_paths = [
+            os.path.expanduser("~/ws_cobot2_pjt/backend"),
+            os.path.expanduser("~/cobot_ws/src/ws_cobot2_pjt/backend"),
+        ]
+        db_dir = possible_paths[0]
+        for p in possible_paths:
+            if os.path.exists(p):
+                db_dir = p
+                break
+        save_dir = os.path.join(db_dir, "static", "inspection_images")
+        os.makedirs(save_dir, exist_ok=True)
+        timestamp = int(time.time() * 1000)
+        filename = f"{error_type}_{timestamp}.jpg"
+        full_path = os.path.join(save_dir, filename)
+        cv2.imwrite(full_path, frame_to_save)
+        return f"/static/inspection_images/{filename}"
+
     def destroy_node(self):
         self.tf_node.destroy_node()
         super().destroy_node()
@@ -427,7 +499,7 @@ class PickYoloTarget(Node):
         self.depth_frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
 
     def _camera_info_cb(self, msg):
-        self.intrinsics = {'fx': msg.k[0], 'fy': msg.k[4], 'ppx': msg.k[2], 'ppy': msg.k[5]}
+        self.camera_intrinsics = {'fx': msg.k[0], 'fy': msg.k[4], 'ppx': msg.k[2], 'ppy': msg.k[5]}
 
     def _joint_state_cb(self, msg):
         robot_joint_names = [f"joint_{i}" for i in range(1, 7)]

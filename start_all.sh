@@ -46,15 +46,16 @@ python3 "$LAYOUT_GENERATOR" "$LAYOUT_FILE" \
   "0-RealSense"      "$(wrap 'RealSense 카메라 구동 중...' "$ROS_ENV && ros2 launch realsense2_camera rs_align_depth_launch.py depth_module.depth_profile:=848x480x30 rgb_camera.color_profile:=1280x720x30 initial_reset:=true align_depth.enable:=true enable_rgbd:=true pointcloud.enable:=true")" \
   "1-Bringup"        "$(wrap '실물 로봇 드라이버 기동 중...' "$ROS_ENV && ros2 launch m0609_rg2_bringup bringup_camera.launch.py mode:=real host:=$ROBOT_HOST")" \
   "2-MoveIt"         "$(wrap 'MoveIt 대기 중 (5초)...' "sleep 5; $ROS_ENV && ros2 launch m0609_rg2_moveit movegroup_only.launch.py")" \
-  "3-Jenga-YOLO"     "$(wrap '젠가 검출 노드 대기 중 (5초)...' "sleep 5; $ROS_ENV && ros2 run object_detection jenga_detection")" \
-  "4-Hand-YOLO"      "$(wrap 'YOLO 손 검출 노드 대기 중 (5초)...' "sleep 5; $ROS_ENV && ros2 run object_hand object_hand")" \
-  "5-Hand-Obstacle"  "$(wrap '손 장애물 퍼블리셔 대기 중 (5초)...' "sleep 5; $ROS_ENV && ros2 run object_hand hand_obstacle_publisher")" \
-  "6-Jenga-Inspector" "$(wrap '젠가 검사 노드 대기 중 (8초)...' "sleep 8; $ROS_ENV && ros2 run robot_control jenga_inspector")" \
-  "7-Backend"        "$(wrap 'HMI 백엔드와 ROS 브릿지 구동 중...' "export PYTHONUNBUFFERED=1; $ROS_ENV && cd $WS_DIR/backend && python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000")" \
-  "8-Frontend"       "$(wrap 'HMI 프론트엔드 구동 중...' "cd $WS_DIR/frontend && npm run dev -- --host 0.0.0.0 --port 5173")" \
-  "9-get_keyword"    "$(wrap '음성 키워드 노드 대기 중 (8초)...' "sleep 8; $ROS_ENV && ros2 run voice_processing get_keyword")" \
-  "10-Tool-Pick"     "$(wrap '공구 픽업 노드 대기 중 (10초)...' "sleep 10; $ROS_ENV && python3 $PICK_SCRIPT")" \
-  "11-Monitor"       "$(wrap 'ROS 상태 확인 + 컨베이어 시리얼 수동 제어' "$ROS_ENV && cd $WS_DIR/conveyor_serial && python3 conveyor_control.py")"
+  "3-Vision-Server"  "$(wrap '통합 비전 서버 구동 중 (5초)...' "sleep 5; $ROS_ENV && ros2 run object_detection unified_vision_server")" \
+  "4-Jenga-YOLO"     "$(wrap '젠가 검출 노드 대기 중 (8초)...' "sleep 8; $ROS_ENV && ros2 run object_detection jenga_detection")" \
+  "5-Hand-YOLO"      "$(wrap 'YOLO 손 검출 노드 대기 중 (8초)...' "sleep 8; $ROS_ENV && ros2 run object_hand object_hand")" \
+  "6-Hand-Obstacle"  "$(wrap '손 장애물 퍼블리셔 대기 중 (8초)...' "sleep 8; $ROS_ENV && ros2 run object_hand hand_obstacle_publisher")" \
+  "7-Jenga-Inspector" "$(wrap '젠가 검사 노드 대기 중 (10초)...' "sleep 10; $ROS_ENV && ros2 run robot_control jenga_inspector")" \
+  "8-Backend"        "$(wrap 'HMI 백엔드와 ROS 브릿지 구동 중...' "export PYTHONUNBUFFERED=1; $ROS_ENV && cd $WS_DIR/backend && python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000")" \
+  "9-Frontend"       "$(wrap 'HMI 프론트엔드 구동 중...' "cd $WS_DIR/frontend && npm run dev -- --host 0.0.0.0 --port 5173")" \
+  "10-get_keyword"   "$(wrap '음성 키워드 노드 대기 중 (10초)...' "sleep 10; $ROS_ENV && ros2 run voice_processing get_keyword")" \
+  "11-Tool-Pick"     "$(wrap '공구 픽업 노드 대기 중 (12초)...' "sleep 12; $ROS_ENV && python3 $PICK_SCRIPT")" \
+  "12-Monitor"       "$(wrap 'ROS 상태 확인 + 컨베이어 시리얼 수동 제어' "$ROS_ENV && cd $WS_DIR/conveyor_serial && python3 conveyor_control.py")"
 
 echo "🚀 통합 시스템을 Terminator 12분할로 실행합니다..."
 terminator --no-dbus --maximise -g "$LAYOUT_FILE" -l main >"$TERMINATOR_LOG" 2>&1 &

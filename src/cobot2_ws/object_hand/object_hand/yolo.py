@@ -6,7 +6,7 @@ from collections import Counter
 
 import rclpy
 from ament_index_python.packages import get_package_share_directory
-from ultralytics import YOLO
+from od_msg.srv import YoloInference
 import numpy as np
 
 
@@ -20,22 +20,18 @@ YOLO_MODEL_PATH = os.path.join(PACKAGE_PATH, "resource", YOLO_MODEL_FILENAME)
 YOLO_JSON_PATH = os.path.join(PACKAGE_PATH, "resource", YOLO_CLASS_NAME_JSON)
 
 
-import torch
-
-
 class YoloModel:
-    def __init__(self):
-        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    def __init__(self, node):
+        self.node = node
         self.last_detection_frame = None
 
-        # Load hand model
-        self.hand_model = YOLO(YOLO_MODEL_PATH)
-        self.hand_model.to(self.device)
+        self.yolo_client = self.node.create_client(YoloInference, '/vision/get_bboxes')
+
         with open(YOLO_JSON_PATH, "r", encoding="utf-8") as file:
             hand_class_dict = json.load(file)
             self.hand_reversed_class_dict = {v: int(k) for k, v in hand_class_dict.items()}
 
-        print(f"YOLO hand model initialized on device: {self.device}")
+        print(f"YOLO hand model configured to use Vision Server")
 
     def get_frames(self, img_node, duration=0.1):
         """get frames while target_time"""
@@ -58,31 +54,36 @@ class YoloModel:
 
     def get_best_detection(self, img_node, target='hand'):
         rclpy.spin_once(img_node)
-        frames = self.get_frames(img_node, duration=0.1)
-        if not frames:  # Check if frames are empty
-            self.last_detection_frame = None
+        self.last_detection_frame = img_node.get_color_frame()
+        if self.last_detection_frame is None:
             return None, None
-        self.last_detection_frame = frames[-1].copy()
 
-        results = self.hand_model(frames, device=self.device, verbose=False)
-        print("classes: ")
-        print(results[0].names)
-        detections = self._aggregate_detections(results)
+        if not self.yolo_client.wait_for_service(timeout_sec=1.0):
+            self.node.get_logger().warn("Vision server not ready")
+            return None, None
+
+        req = YoloInference.Request()
+        req.model_name = 'hand'
+        req.confidence_threshold = 0.5
         
-        # We always check for the hand target in this package
-        target_name = 'hand'
-        if target_name not in self.hand_reversed_class_dict:
-            print(f"Target '{target_name}' not in class dictionary.")
+        future = self.yolo_client.call_async(req)
+        rclpy.spin_until_future_complete(self.node, future)
+        res = future.result()
+        
+        detections = []
+        if res and res.success:
+            try:
+                detections = json.loads(res.json_result)
+            except:
+                pass
+                
+        if not detections:
             return None, None
 
-        label_id = self.hand_reversed_class_dict[target_name]
-        print("label_id: ", label_id)
-        print("detections: ", detections)
-
-        matches = [d for d in detections if d["label"] == label_id]
+        matches = [d for d in detections if d["name"] == target or d["class_id"] == self.hand_reversed_class_dict.get(target, -1)]
         if not matches:
-            print("No matches found for the target label.")
             return None, None
+            
         best_det = max(matches, key=lambda x: x["score"])
         return best_det["box"], best_det["score"]
 

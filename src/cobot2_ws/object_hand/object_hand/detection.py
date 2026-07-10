@@ -48,7 +48,7 @@ class ObjectHandNode(Node):
     def _load_model(self, name):
         """모델 이름에 따라 인스턴스를 반환합니다."""
         if name.lower() == 'yolo':
-            return YoloModel()
+            return YoloModel(self)
         raise ValueError(f"Unsupported model: {name}")
 
     def handle_get_depth(self, request, response):
