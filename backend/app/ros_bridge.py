@@ -563,19 +563,7 @@ class VoiceBridgeNode(Node):
                 ],
             }, ensure_ascii=False))
             return
-        kind = "jenga_inspection_failed"
-        if self._recent_alert_sent(kind):
-            return
-        self._broadcast_alert(json.dumps({
-            "type": "alert",
-            "kind": kind,
-            "title": "젠가 검사 실패",
-            "message": normalized or "젠가 검사가 실패했습니다. 상태를 확인한 뒤 재검사하거나 작업을 취소하세요.",
-            "actions": [
-                {"label": "재검사", "command": "retry_jenga", "variant": "primary"},
-                {"label": "작업 취소", "command": "cancel_task", "variant": "danger"},
-            ],
-        }, ensure_ascii=False))
+        self.get_logger().info(f"젠가 검사 불합격 알림 수신 (팝업 미생성): {normalized}")
 
     def force_jenga_insufficient_images_alert(self) -> dict:
         self._broadcast_alert(json.dumps({
