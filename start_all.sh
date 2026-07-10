@@ -31,7 +31,7 @@ ENV_FILE="$WS_DIR/src/cobot2_ws/voice_processing/resource/.env"
 CONVEYOR_SCRIPT="$WS_DIR/conveyor_serial/conveyor_control.py"
 LAYOUT_FILE="/tmp/cobot_all_terminator_layout.conf"
 TERMINATOR_LOG="/tmp/cobot_all_terminator.log"
-ROS_ENV="export ROS_DOMAIN_ID=$ROS_DOMAIN_ID && source /opt/ros/humble/setup.bash && source $WS_DIR/install/setup.bash"
+ROS_ENV="export ROS_DOMAIN_ID=$ROS_DOMAIN_ID && source /opt/ros/humble/setup.bash && source $WS_DIR/install/setup.bash && export PYTHONPATH=$WS_DIR/src/cobot2_ws/object_detection:\$PYTHONPATH"
 
 for required_file in "$LAYOUT_GENERATOR" "$PICK_SCRIPT" "$ENV_FILE" "$CONVEYOR_SCRIPT"; do
   if [ ! -f "$required_file" ]; then
