@@ -40,6 +40,21 @@ export interface RobotStartResult {
   message: string
 }
 
+export interface HmiAlertAction {
+  label: string
+  command: 'retry_jenga' | 'retry_tool' | 'cancel_task' | 'dismiss'
+  variant?: 'primary' | 'danger' | 'secondary'
+}
+
+export interface HmiAlertPayload {
+  id: number
+  kind?: string
+  title?: string
+  message?: string
+  image_url?: string
+  actions?: HmiAlertAction[]
+}
+
 export function emergencyStop(): Promise<RobotCommandResult> {
   return request<RobotCommandResult>('/api/robot/emergency_stop', { method: 'POST' })
 }
@@ -70,4 +85,8 @@ export function retryPickTask(): Promise<RobotCommandResult> {
 
 export function cancelTask(): Promise<RobotCommandResult> {
   return request<RobotCommandResult>('/api/robot/cancel_task', { method: 'POST' })
+}
+
+export function getLatestAlert(): Promise<{ alert: HmiAlertPayload | null }> {
+  return request<{ alert: HmiAlertPayload | null }>('/api/robot/alerts/latest')
 }

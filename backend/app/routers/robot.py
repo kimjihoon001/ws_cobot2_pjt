@@ -49,6 +49,20 @@ def robot_status():
     return ros_bridge._bridge.get_robot_status()
 
 
+@router.get("/alerts/latest")
+def latest_alert():
+    if not ros_bridge._bridge:
+        return {"alert": None}
+    return ros_bridge._bridge.get_latest_alert()
+
+
+@router.post("/debug/force_jenga_insufficient_alert")
+def force_jenga_insufficient_alert():
+    if not ros_bridge._bridge:
+        return {"success": False, "message": "ROS 브릿지 미연결"}
+    return ros_bridge._bridge.force_jenga_insufficient_images_alert()
+
+
 @router.post("/start_listen")
 def start_listen():
     """HMI '음성 시작' 버튼 -> get_keyword를 호출해 웨이크워드 대기를 켠다.
