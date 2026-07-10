@@ -419,45 +419,74 @@ class PickYoloTarget(Node):
     def detect_once(self, target_class=None, timeout_sec=DETECT_TIMEOUT_SEC):
         start_time = time.time()
         while time.time() - start_time < timeout_sec:
-            # depth/intrinsics 대기
-            while getattr(self, 'depth_frame', None) is None or self.camera_intrinsics is None:
+            if self.hmi_stop_requested:
+                self.get_logger().warn('HMI 긴급정지로 탐지를 중단합니다.')
+                return None
+            
+            while getattr(self, 'depth_frame', None) is None or getattr(self, 'color_frame', None) is None or self.camera_intrinsics is None:
                 rclpy.spin_once(self, timeout_sec=0.01)
                 if time.time() - start_time > timeout_sec:
                     return None
             
-            # 서버 호출
             if not self.yolo_client.wait_for_service(timeout_sec=1.0):
                 self.get_logger().warn("Vision server not ready...")
                 continue
                 
             req = YoloInference.Request()
             req.model_name = 'tool'
-            req.confidence_threshold = 0.5
+            req.confidence_threshold = CONFIDENCE_THRESHOLD
             
             future = self.yolo_client.call_async(req)
             rclpy.spin_until_future_complete(self, future)
             res = future.result()
             
+            detections = []
             if res and res.success:
                 try:
                     detections = json.loads(res.json_result)
                 except Exception as e:
                     self.get_logger().error(f"Failed to parse vision server response: {e}")
-                    detections = []
-            else:
-                detections = []
+            
+            # target_class 필터링 & KEYPOINT_AXIS_ROLE 필터링
+            valid_dets = []
+            for d in detections:
+                if d.get("score", 0) < CONFIDENCE_THRESHOLD: continue
+                cname = d.get("name", "")
+                if cname not in KEYPOINT_AXIS_ROLE: continue
+                if target_class is not None and cname != target_class: continue
+                valid_dets.append(d)
                 
-            if len(detections) > 0:
-                # target_class 필터링
-                if target_class:
-                    valid_dets = [d for d in detections if d["name"] == target_class]
+            best_det = None
+            if valid_dets:
+                best_det = max(valid_dets, key=lambda x: x.get("score", 0))
+            
+            # 시각화 (탐지 여부와 무관하게 매 프레임 갱신)
+            self._visualize(self.color_frame, detections, best_det)
+
+            if best_det is not None and "keypoints" in best_det:
+                class_name = best_det["name"]
+                box = best_det["box"]
+                x1, y1, x2, y2 = map(int, box)
+                score = best_det["score"]
+                kpts_xy = best_det["keypoints"]
+                
+                role = KEYPOINT_AXIS_ROLE[class_name]
+                head_px = np.mean([kpts_xy[j] for j in role['head_idx']], axis=0)
+                tail_px = np.array(kpts_xy[role['tail_idx']])
+                
+                if (head_px[0] == 0 and head_px[1] == 0) or (tail_px[0] == 0 and tail_px[1] == 0):
+                    cx_px, cy_px = int((x1 + x2) / 2), int((y1 + y2) / 2)
+                    axis_vector = None
                 else:
-                    valid_dets = detections
-                    
-                if valid_dets:
-                    best_det = max(valid_dets, key=lambda x: x["score"])
-                    # best_det["box"] -> [x1, y1, x2, y2]
-                    return best_det
+                    head_weight, tail_weight = GRASP_POINT_WEIGHTS_BY_CLASS.get(class_name, (0.5, 0.5))
+                    cx_px = int(head_px[0] * head_weight + tail_px[0] * tail_weight)
+                    cy_px = int(head_px[1] * head_weight + tail_px[1] * tail_weight)
+                    axis_vector = (head_px[0] - tail_px[0], head_px[1] - tail_px[1])
+                
+                depth_m = self._sample_depth(cx_px, cy_px, axis_vector=axis_vector)
+                if depth_m is not None:
+                    self.get_logger().info(f'{class_name} 탐지 (conf={score:.2f}, depth={depth_m:.3f}m)')
+                    return cx_px, cy_px, depth_m, head_px, tail_px, class_name
             
             rclpy.spin_once(self, timeout_sec=0.1)
         
@@ -724,39 +753,43 @@ class PickYoloTarget(Node):
             return None
         return depth_m
 
-    def _visualize(self, frame, results, best):
+    def _visualize(self, frame, detections, best_det):
         """탐지 결과를 OpenCV 윈도우에 시각화."""
         vis = frame.copy()
         # 모든 박스 그리기
-        for box_xyxy, score, label in zip(
-            results.boxes.xyxy.tolist(), results.boxes.conf.tolist(), results.boxes.cls.tolist()
-        ):
-            x1, y1, x2, y2 = map(int, box_xyxy)
-            class_name = CLASS_NAMES.get(int(label), f'class_{int(label)}')
-            is_target = (best is not None and class_name in KEYPOINT_AXIS_ROLE and score >= CONFIDENCE_THRESHOLD)
+        for d in detections:
+            box = d.get("box", [0,0,0,0])
+            x1, y1, x2, y2 = map(int, box)
+            score = d.get("score", 0.0)
+            class_name = d.get("name", "unknown")
+            is_target = (best_det is not None and d == best_det)
             color = (0, 255, 0) if is_target else (128, 128, 128)  # 타겟=녹색, 기타=회색
             thickness = 3 if is_target else 1
             cv2.rectangle(vis, (x1, y1), (x2, y2), color, thickness)
             cv2.putText(vis, f'{class_name} {score:.2f}', (x1, y1 - 8),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, thickness)
         # 타겟 키포인트 그리기
-        if best is not None:
-            _, (bx1, by1, bx2, by2), bidx, best_class = best
+        if best_det is not None and "keypoints" in best_det:
+            box = best_det.get("box", [0,0,0,0])
+            bx1, by1, bx2, by2 = map(int, box)
+            best_class = best_det.get("name", "unknown")
             cx, cy = int((bx1 + bx2) / 2), int((by1 + by2) / 2)
             cv2.circle(vis, (cx, cy), 8, (0, 0, 255), -1)  # 중심점 빨간 원
-            role = KEYPOINT_AXIS_ROLE[best_class]
-            kpts_xy = results.keypoints.xy[bidx].tolist()
-            for kidx, kpt in enumerate(kpts_xy):
-                kx, ky = int(kpt[0]), int(kpt[1])
-                if kx == 0 and ky == 0:
-                    continue
-                kcolor = (255, 0, 0) if kidx in role['head_idx'] else (0, 165, 255)
-                cv2.circle(vis, (kx, ky), 5, kcolor, -1)
-            # 축 선 그리기 (head → tail)
-            head_px = np.mean([kpts_xy[j] for j in role['head_idx']], axis=0)
-            tail_px = kpts_xy[role['tail_idx']]
-            cv2.line(vis, (int(head_px[0]), int(head_px[1])),
-                     (int(tail_px[0]), int(tail_px[1])), (0, 255, 255), 2)
+            
+            if best_class in KEYPOINT_AXIS_ROLE:
+                role = KEYPOINT_AXIS_ROLE[best_class]
+                kpts_xy = best_det["keypoints"]
+                for kidx, kpt in enumerate(kpts_xy):
+                    kx, ky = int(kpt[0]), int(kpt[1])
+                    if kx == 0 and ky == 0:
+                        continue
+                    kcolor = (255, 0, 0) if kidx in role['head_idx'] else (0, 165, 255)
+                    cv2.circle(vis, (kx, ky), 5, kcolor, -1)
+                # 축 선 그리기 (head → tail)
+                head_px = np.mean([kpts_xy[j] for j in role['head_idx']], axis=0)
+                tail_px = kpts_xy[role['tail_idx']]
+                cv2.line(vis, (int(head_px[0]), int(head_px[1])),
+                         (int(tail_px[0]), int(tail_px[1])), (0, 255, 255), 2)
         # 임계값 표시
         targets_label = '/'.join(KEYPOINT_AXIS_ROLE.keys())
         cv2.putText(vis, f'Threshold: {CONFIDENCE_THRESHOLD:.0%}  Target: {targets_label}',
@@ -773,65 +806,7 @@ class PickYoloTarget(Node):
         msg.data = vis_u8.tobytes()
         self._vis_pub.publish(msg)
 
-    def detect_once(self, target_class=None, timeout_sec=DETECT_TIMEOUT_SEC):
-        """color/depth/intrinsics가 갖춰지면, 화면에 보이는 픽업 대상(KEYPOINT_AXIS_ROLE에
-        등록된 클래스) 중 최고 confidence 탐지 1건을 반환. target_class가 주어지면
-        그 클래스만 후보로 필터링(음성으로 특정 도구를 지정받았을 때 사용), None이면
-        기존처럼 등록된 아무 클래스나 최고 confidence로 고른다."""
-        deadline = time.monotonic() + timeout_sec
-        while rclpy.ok() and time.monotonic() < deadline:
-            if self.hmi_stop_requested:
-                self.get_logger().warn('HMI 긴급정지로 탐지를 중단합니다.')
-                return None
-            rclpy.spin_once(self, timeout_sec=0.1)
-            if self.color_frame is None or self.depth_frame is None or self.intrinsics is None:
-                continue
 
-            results = self.model(self.color_frame, device=self.device, verbose=False)[0]
-            best = None
-            for idx, (box_xyxy, score, label) in enumerate(zip(
-                results.boxes.xyxy.tolist(), results.boxes.conf.tolist(), results.boxes.cls.tolist(),
-            )):
-                if score < CONFIDENCE_THRESHOLD:
-                    continue
-                class_name = CLASS_NAMES.get(int(label), f'class_{int(label)}')
-                if class_name not in KEYPOINT_AXIS_ROLE:
-                    continue
-                if target_class is not None and class_name != target_class:
-                    continue
-                if best is None or score > best[0]:
-                    best = (score, box_xyxy, idx, class_name)
-
-            # 시각화 (탐지 여부와 무관하게 매 프레임 갱신)
-            self._visualize(self.color_frame, results, best)
-
-            if best is None:
-                continue
-
-            score, (x1, y1, x2, y2), idx, class_name = best
-
-            role = KEYPOINT_AXIS_ROLE[class_name]
-            kpts_xy = results.keypoints.xy[idx].tolist()
-            head_px = np.mean([kpts_xy[j] for j in role['head_idx']], axis=0)
-            tail_px = np.array(kpts_xy[role['tail_idx']])
-
-            # 바운딩 박스 중심 대신 꼬리(tail) 쪽에 더 가까운 지점을 파지 목표점(Z 측정점)으로 사용
-            if (head_px[0] == 0 and head_px[1] == 0) or (tail_px[0] == 0 and tail_px[1] == 0):
-                # 키포인트가 제대로 잡히지 않은 경우 기존 바운딩 박스 중심으로 폴백
-                cx_px, cy_px = int((x1 + x2) / 2), int((y1 + y2) / 2)
-                axis_vector = None
-            else:
-                head_weight, tail_weight = GRASP_POINT_WEIGHTS_BY_CLASS[class_name]
-                cx_px = int(head_px[0] * head_weight + tail_px[0] * tail_weight)
-                cy_px = int(head_px[1] * head_weight + tail_px[1] * tail_weight)
-                axis_vector = (head_px[0] - tail_px[0], head_px[1] - tail_px[1])
-
-            depth_m = self._sample_depth(cx_px, cy_px, axis_vector=axis_vector)
-            if depth_m is None:
-                continue
-
-            self.get_logger().info(f'{class_name} 탐지 (conf={score:.2f}, depth={depth_m:.3f}m)')
-            return cx_px, cy_px, depth_m, head_px, tail_px, class_name
 
         return None
 

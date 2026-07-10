@@ -357,7 +357,7 @@ class JengaInspectorNode(Node):
         hole_boxes = []
         
         for d in detections:
-            cls_name = d["class_name"]
+            cls_name = d.get("name", d.get("class_name", ""))
             if cls_name == 'entire':
                 entire_box = d["box"]
             elif cls_name.lower() == 'smallhole':

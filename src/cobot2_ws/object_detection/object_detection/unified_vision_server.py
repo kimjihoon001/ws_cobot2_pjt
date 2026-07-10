@@ -99,7 +99,7 @@ class UnifiedVisionServer(Node):
         detections = []
         if len(results) > 0:
             res = results[0]
-            for box, score, label in zip(res.boxes.xyxy.tolist(), res.boxes.conf.tolist(), res.boxes.cls.tolist()):
+            for i, (box, score, label) in enumerate(zip(res.boxes.xyxy.tolist(), res.boxes.conf.tolist(), res.boxes.cls.tolist())):
                 if score >= conf_thresh:
                     cls_id = int(label)
                     
@@ -110,12 +110,19 @@ class UnifiedVisionServer(Node):
                     elif hasattr(model, 'names') and isinstance(model.names, dict):
                         name = model.names.get(cls_id, name)
                         
-                    detections.append({
+                    det = {
                         "name": name,
                         "class_id": cls_id,
                         "box": [float(x) for x in box],
                         "score": float(score)
-                    })
+                    }
+                    if hasattr(res, 'keypoints') and res.keypoints is not None and len(res.keypoints) > 0:
+                        try:
+                            kpts = res.keypoints.xy[i].tolist()
+                            det["keypoints"] = kpts
+                        except Exception:
+                            pass
+                    detections.append(det)
                     
         response.success = True
         response.json_result = json.dumps(detections)
