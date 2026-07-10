@@ -2,6 +2,8 @@ import os
 import json
 import rclpy
 from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.callback_groups import ReentrantCallbackGroup
 import torch
 import cv2
 from ament_index_python.packages import get_package_share_directory
@@ -62,13 +64,17 @@ class UnifiedVisionServer(Node):
         self.get_logger().info("Loading jenga inspection model...")
         self.models['inspector'] = YOLO(INSPECTOR_MODEL_PATH, task='detect')
 
+        # Create a reentrant callback group for multi-threading
+        self.callback_group = ReentrantCallbackGroup()
+
         # Create the inference service
         self.srv = self.create_service(
             YoloInference,
             '/vision/get_bboxes',
-            self.handle_get_bboxes
+            self.handle_get_bboxes,
+            callback_group=self.callback_group
         )
-        self.get_logger().info("Unified Vision Server is ready!")
+        self.get_logger().info("Unified Vision Server is ready! (Multi-Threaded)")
 
     def handle_get_bboxes(self, request, response):
         model_name = request.model_name
@@ -121,8 +127,11 @@ class UnifiedVisionServer(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = UnifiedVisionServer()
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
+    
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
