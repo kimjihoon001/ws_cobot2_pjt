@@ -1,4 +1,5 @@
 import os
+import subprocess
 import sys
 import time
 import json
@@ -1167,7 +1168,53 @@ class JengaInspectorNode(Node):
             self.get_logger().error(f"홈 top 사진 저장 실패: {filename}")
             return None
 
+    def play_audio(self, filename):
+        try:
+            voice_share = get_package_share_directory("voice_processing")
+            audio_path = os.path.join(voice_share, "resource/audio", filename)
+            if os.path.exists(audio_path):
+                self.get_logger().info(f"Playing audio: {audio_path}")
+                subprocess.Popen(["gst-play-1.0", audio_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                self.get_logger().warn(f"Audio file not found: {audio_path}")
+        except Exception as e:
+            self.get_logger().error(f"Failed to play audio {filename}: {e}")
+
+    def play_combined_audio(self, filenames, delay_sec=0.7):
+        try:
+            import scipy.io.wavfile as wav
+            voice_share = get_package_share_directory("voice_processing")
+            audio_dir = os.path.join(voice_share, "resource/audio")
+            
+            combined_data = []
+            fs = 24000  # Default fallback
+            dtype = np.int16  # Default fallback
+            
+            for i, filename in enumerate(filenames):
+                audio_path = os.path.join(audio_dir, filename)
+                if os.path.exists(audio_path):
+                    rate, data = wav.read(audio_path)
+                    fs = rate
+                    dtype = data.dtype
+                    combined_data.append(data)
+                    
+                    if i < len(filenames) - 1:
+                        silence = np.zeros(int(fs * delay_sec), dtype=dtype)
+                        combined_data.append(silence)
+                else:
+                    self.get_logger().warn(f"Audio file not found for combination: {audio_path}")
+            
+            if combined_data:
+                final_data = np.concatenate(combined_data)
+                temp_output_path = "/tmp/combined_result.wav"
+                wav.write(temp_output_path, fs, final_data)
+                self.get_logger().info(f"Playing combined audio: {temp_output_path}")
+                subprocess.Popen(["gst-play-1.0", temp_output_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            self.get_logger().error(f"Failed to create or play combined audio: {e}")
+
     def publish_jenga_exception_alert(self, kind, title, message, image_url=None):
+        self.play_audio("not_found.wav")
         payload = {
             "type": "alert",
             "kind": kind,
@@ -1278,6 +1325,7 @@ class JengaInspectorNode(Node):
 
     def _run_inspection_thread(self, request, response):
         """Background thread executing the Jenga inspection and scanning sequence."""
+        self.play_audio("qc_start.wav")
         JReady = [-62.57, 2.16, 76.81, 0.00, 100.99, -62.44]
 
         # 컨베이어로 검사장소까지 이동시키고, 도착할 때까지 기다린 뒤에 검사를 시작한다.
@@ -1537,6 +1585,29 @@ class JengaInspectorNode(Node):
         failed_reasons = []
         is_pass = self.analyze_defects()
         final_result = "PASS" if is_pass else "FAIL"
+        
+        # 2초의 묵음 간격으로 여러 오디오 파일을 하나로 연결하여 비동기식으로 단 한번에 재생시킵니다.
+        # 이 과정에서 로봇 제어 스레드의 대기 시간(time.sleep)이 제거되므로 로봇은 곧바로 홈으로 복귀합니다.
+        if is_pass:
+            matched = getattr(self, 'final_matched_product', '')
+            type_wav = ""
+            if "기본" in matched:
+                type_wav = "type_basic.wav"
+            elif "A형" in matched:
+                type_wav = "type_a.wav"
+            elif "B형" in matched:
+                type_wav = "type_b.wav"
+            elif "C형" in matched:
+                type_wav = "type_c.wav"
+            
+            audio_files = ["qc_done.wav", "pass.wav"]
+            if type_wav:
+                audio_files.append(type_wav)
+                
+            self.play_combined_audio(audio_files, delay_sec=0.7)
+        else:
+            self.play_combined_audio(["qc_done.wav", "fail.wav", "discard.wav"], delay_sec=1.5)
+
         if not is_pass:
             failed_reasons.append("Jenga 6-Floor assembly pattern does not match reference templates (Detected wrong hole patterns)")
         import json
@@ -1585,6 +1656,7 @@ class JengaInspectorNode(Node):
             )
             self.conveyor.move(CONVEYOR_MOVE_TO_PASS_STEPS)
 
+        push_completed = False
         # 불합격이면 바로 젠가 블록을 밀어낸다 (접근 자세 → 미는 자세)
         if not is_pass:
             self.get_logger().info("검사 불합격 - 젠가 블록을 밀어냅니다...")
@@ -1654,6 +1726,7 @@ class JengaInspectorNode(Node):
 
                     target_result = push_move_check_hand(PUSH_TARGET_JOINTS_DEG, "밀기 목표 자세")
                     if target_result == "success":
+                        push_completed = True
                         break
                     if target_result == "abort":
                         self.get_logger().error(
@@ -1725,6 +1798,9 @@ class JengaInspectorNode(Node):
         if final_result == "PASS":
             response.success = True
             response.message = f"Jenga Inspection: PASS ({getattr(self, 'final_matched_product', 'Matched')})"
+        elif final_result == "FAIL" and push_completed:
+            response.success = True
+            response.message = f"Jenga Inspection: FAIL (Successfully Discarded)"
         else:
             response.success = False
             response.message = f"Jenga Inspection: FAIL (Unknown Pattern)"

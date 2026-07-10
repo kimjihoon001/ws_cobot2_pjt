@@ -2,6 +2,7 @@ import math
 import json
 import os
 import struct
+import subprocess
 import time
 import cv2
 
@@ -31,6 +32,7 @@ from tf2_geometry_msgs import do_transform_pose
 from onrobot_rg_msgs.msg import OnRobotRGInput
 from onrobot_rg_msgs.srv import SetCommand
 from od_msg.srv import ConfirmTools
+from ament_index_python.packages import get_package_share_directory
 
 # 최종 하강(grasp)은 관절공간 IK 이동 대신 MoveIt Cartesian Path
 # (compute_cartesian_path + ExecuteTrajectory)로 처리 — pregrasp/grasp를 각각
@@ -414,6 +416,18 @@ class PickYoloTarget(Node):
             rclpy.spin_once(self, timeout_sec=0.1)
 
         self.get_logger().info('준비 완료')
+
+    def play_audio(self, filename):
+        try:
+            voice_share = get_package_share_directory("voice_processing")
+            audio_path = os.path.join(voice_share, "resource/audio", filename)
+            if os.path.exists(audio_path):
+                self.get_logger().info(f"Playing audio: {audio_path}")
+                subprocess.Popen(["gst-play-1.0", audio_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                self.get_logger().warn(f"Audio file not found: {audio_path}")
+        except Exception as e:
+            self.get_logger().error(f"Failed to play audio {filename}: {e}")
 
     def destroy_node(self):
         self.tf_node.destroy_node()
@@ -1823,6 +1837,11 @@ class PickYoloTarget(Node):
                 break
 
             # 배송 위치에서 손 근접을 기다린 뒤 그리퍼를 열어 전달한다.
+            if tool_name == "hammer":
+                self.play_audio("tool_hammer.wav")
+            elif tool_name == "screwdriver":
+                self.play_audio("tool_screwdriver.wav")
+
             released = self.wait_for_release(tool_name, target)
             if released in ('timeout', 'cancel'):
                 self.get_logger().info(f'{tool_name} 수령 실패/취소 - 도구를 원위치로 복귀합니다.')

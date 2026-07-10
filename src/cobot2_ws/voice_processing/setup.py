@@ -14,7 +14,7 @@ setup(
         ('share/' + package_name, ['package.xml']),
 
         (os.path.join('share', package_name, 'resource'), glob('resource/*.tflite') + glob('resource/*.npy') + ['resource/.env']),
-        (os.path.join('share', package_name, 'resource/audio'), glob('resource/audio/*.mp3')),
+        (os.path.join('share', package_name, 'resource/audio'), glob('resource/audio/*.mp3') + glob('resource/audio/*.wav')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
