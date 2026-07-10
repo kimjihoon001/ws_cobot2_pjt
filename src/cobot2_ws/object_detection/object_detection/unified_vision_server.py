@@ -23,9 +23,14 @@ HAND_MODEL_PATH = os.path.join(PKG_OBJ_HAND, 'resource', 'hand_yolov8n.pt')
 
 # Tool pick
 TOOL_MODEL_PATH = os.path.expanduser('~/ws_cobot2_pjt/src/cobot2_ws/voice_processing/resource/toolbest.pt')
+if not os.path.exists(TOOL_MODEL_PATH):
+    TOOL_MODEL_PATH = os.path.expanduser('~/cobot_ws/src/ws_cobot2_pjt/src/cobot2_ws/voice_processing/resource/toolbest.pt')
 
 # Jenga inspection
 WORKSPACE_PATH = os.path.expanduser('~/ws_cobot2_pjt')
+if not os.path.exists(WORKSPACE_PATH):
+    WORKSPACE_PATH = os.path.expanduser('~/cobot_ws/src/ws_cobot2_pjt')
+
 INSPECTOR_MODEL_PATH = os.path.join(WORKSPACE_PATH, 'src/yolov8_ws/model/best_3.onnx')
 if not os.path.exists(INSPECTOR_MODEL_PATH):
     INSPECTOR_MODEL_PATH = os.path.join(WORKSPACE_PATH, 'src/yolov8_ws/model/best_2.onnx')
