@@ -85,10 +85,7 @@ class UnifiedVisionServer(Node):
             response.json_result = json.dumps({"error": f"Model {model_name} not found"})
             return response
             
-        # Spin to get latest frame
-        for _ in range(5):
-            rclpy.spin_once(self.img_node, timeout_sec=0.001)
-            
+        # Spin to get latest frame is no longer needed because img_node is spun by the executor
         frame = self.img_node.get_color_frame()
         if frame is None:
             response.success = False
@@ -129,6 +126,7 @@ def main(args=None):
     node = UnifiedVisionServer()
     executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
+    executor.add_node(node.img_node)
     
     try:
         executor.spin()
