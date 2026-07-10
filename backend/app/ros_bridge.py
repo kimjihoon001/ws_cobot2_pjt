@@ -112,14 +112,7 @@ class VoiceBridgeNode(Node):
         self._switch_controller_cli = self.create_client(
             SwitchController, "/dsr01/controller_manager/switch_controller", callback_group=cb_group
         )
-        self._move_stop_cli = self.create_client(MoveStop, "/dsr01/motion/move_stop", callback_group=cb_group)
-        self._servo_off_cli = self.create_client(ServoOff, "/dsr01/system/servo_off", callback_group=cb_group)
-        self._set_control_cli = self.create_client(
-            SetRobotControl, "/dsr01/system/set_robot_control", callback_group=cb_group
-        )
-        self._get_robot_state_cli = self.create_client(
-            GetRobotState, "/dsr01/system/get_robot_state", callback_group=cb_group
-        )
+
         self._gripper_command_cli = self.create_client(SetCommand, "/onrobot/sendCommand", callback_group=cb_group)
         self._joint_trajectory_action = ActionClient(
             self,
@@ -137,7 +130,7 @@ class VoiceBridgeNode(Node):
         for topic in ("/joint_states", "/dsr01/joint_states", "/dsr01/gz/joint_states", "/gripper_joint_states"):
             self.create_subscription(JointState, topic, self._handle_joint_state, 10, callback_group=cb_group)
         self.create_subscription(OnRobotRGInput, "/OnRobotRGInput", self._handle_gripper_status, 10, callback_group=cb_group)
-        self.create_timer(0.5, self._poll_robot_state, callback_group=cb_group)
+
         self._hmi_get_keyword_in_flight = False
         self._last_pick_task_data = ""
         self._last_pick_task_at = 0.0
@@ -168,30 +161,7 @@ class VoiceBridgeNode(Node):
         self._joint_units["gripper"] = "mm"
         self._last_gripper_state_at = time.monotonic()
 
-    def _poll_robot_state(self):
-        if self._estop_releasing or self._state_poll_in_flight:
-            return
-        if not self._get_robot_state_cli.service_is_ready():
-            return
-        self._state_poll_in_flight = True
-        future = self._get_robot_state_cli.call_async(GetRobotState.Request())
-        future.add_done_callback(self._on_robot_state)
 
-    def _on_robot_state(self, future):
-        try:
-            result = future.result()
-            if result is None:
-                return
-            if result.robot_state in ESTOP_STATES and not self._estop_active:
-                self._estop_active = True
-                self._estop_message = f"외부 비상정지 감지 (robot_state={result.robot_state})"
-                self._jenga_inspection_running = False
-                self._hmi_get_keyword_in_flight = False
-                self.get_logger().warning(self._estop_message)
-        except Exception as e:
-            self.get_logger().warning(f"로봇 상태 폴링 실패: {e}")
-        finally:
-            self._state_poll_in_flight = False
 
     @staticmethod
     def _rg2_joint_to_width_mm(joint_angle: float) -> float:
@@ -501,19 +471,7 @@ class VoiceBridgeNode(Node):
         ok = bool(getattr(response, "ok", False))
         return {"success": ok, "message": "ok" if ok else result["message"]}
 
-    def _wait_until_not_estop(self, timeout: float) -> bool:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            req = GetRobotState.Request()
-            result = self._call_dsr_service(self._get_robot_state_cli, req, "get_robot_state", timeout=1.0)
-            response = result.get("response")
-            if response is not None and getattr(response, "robot_state", None) not in ESTOP_STATES:
-                return True
-            if not result["success"]:
-                time.sleep(0.2)
-                continue
-            time.sleep(0.2)
-        return False
+
 
     def _publish_pick_task(self, tools, targets, source: str):
         data = " ".join(f"{tool}:{target}" for tool, target in zip(tools, targets))

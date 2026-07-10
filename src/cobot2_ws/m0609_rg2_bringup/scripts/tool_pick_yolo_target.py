@@ -1832,8 +1832,22 @@ class PickYoloTarget(Node):
             delivery_joints_deg = TOOL_DELIVERY_JOINTS_DEG.get(class_name, TOOL_SCAN_JOINTS_DEG)
             if not self.pick_detected_tool(detection, delivery_joints_deg):
                 self.get_logger().error(f'{tool_name} pick/배송 실패 - 도구 전달 작업을 취소합니다.')
-                self._publish_tool_task_status("cancelled", "도구 전달 취소")
-                cancelled_or_failed = True
+                image_url = self._save_alert_image("tool_pick_failed")
+                self._publish_tool_task_status(
+                    "waiting_retry",
+                    f"{tool_name} 전달 실패 - 재시도 대기",
+                    remaining_tools_message,
+                )
+                self._publish_exception_alert(
+                    "tool_pick_failed",
+                    "공구 전달 실패 (IK 오류)",
+                    f"IK 해를 찾지 못하여 {tool_name} 전달에 실패했습니다. 주변 환경을 확인한 뒤 재시도하거나 취소하세요.",
+                    image_url,
+                )
+                keep_status_for_retry = True
+
+                # 툴 픽 실패 시 조인트값 기준 0,0,90,0,90,0의 위치로 이동
+                self.move_to_joints([math.radians(d) for d in [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]])
                 break
 
             # 배송 위치에서 손 근접을 기다린 뒤 그리퍼를 열어 전달한다.

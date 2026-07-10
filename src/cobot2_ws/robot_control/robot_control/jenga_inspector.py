@@ -102,8 +102,7 @@ CONVEYOR_MOVE_TO_PASS_STEPS = -2300
 # PUSH_APPROACH_JOINTS_DEG로 접근한 뒤 PUSH_TARGET_JOINTS_DEG로 이동하며 민다.
 PUSH_APPROACH_JOINTS_DEG = [-39.51, -21.94, 115.68, -0.33, 85.92, 140.73]
 PUSH_TARGET_JOINTS_DEG = [-67.14, 10.59, 87.35, -0.11, 81.50, 113.21]
-DOOSAN_QUICK_STOP_MODE = 1  # DR_QSTOP: Quick stop without STO
-DOOSAN_MOVE_STOP_SERVICE = f'/{ROBOT_ID}/motion/move_stop'
+
 
 
 class JengaInspectorNode(Node):
@@ -182,11 +181,7 @@ class JengaInspectorNode(Node):
         self.action_node = rclpy.create_node("jenga_inspector_action_node")
         self.ikin_client = self.action_node.create_client(GetPositionIK, '/compute_ik')
         self._ac = ActionClient(self.action_node, MoveGroup, '/move_action')
-        self.move_stop_service_name = DOOSAN_MOVE_STOP_SERVICE
-        self.move_stop_client = self.action_node.create_client(
-            MoveStop,
-            self.move_stop_service_name
-        )
+
 
         # Clients for perception (created on action_node to bypass executor deadlock)
         self.get_position_client = self.action_node.create_client(
@@ -204,12 +199,7 @@ class JengaInspectorNode(Node):
         self.get_logger().info("Waiting for MoveGroup Action server...")
         self._ac.wait_for_server()
         self.get_logger().info("MoveGroup Action server connected.")
-        if self.move_stop_client.wait_for_service(timeout_sec=2.0):
-            self.get_logger().info(f"Doosan move_stop service connected: {self.move_stop_service_name}")
-        else:
-            self.get_logger().warn(
-                f"Doosan move_stop service not available yet: {self.move_stop_service_name}"
-            )
+
 
         # TF Listener to get current robot pose without blocking DSR services
         self.tf_buffer = Buffer()
@@ -500,7 +490,6 @@ class JengaInspectorNode(Node):
                 self.push_hand_seen = True
                 if not self.push_cancel_requested:
                     self.push_cancel_requested = True
-                    self.request_doosan_quick_stop("밀기 중 손 감지")
                     goal_handle = self.active_goal_handle
                     if goal_handle is not None:
                         try:
@@ -521,54 +510,7 @@ class JengaInspectorNode(Node):
         client.call_async(req)
         self.get_logger().info('Cleared octomap to force straight planning.')
 
-    def request_doosan_quick_stop(self, reason):
-        """Requests a controller-level quick stop; MoveGroup cancel alone can lag behind execution."""
-        if not self.ensure_move_stop_service_ready():
-            self.get_logger().error(
-                f"{reason} - Doosan quick stop 서비스가 준비되지 않아 로봇 정지 요청을 보내지 못했습니다."
-            )
-            return
 
-        req = MoveStop.Request()
-        req.stop_mode = DOOSAN_QUICK_STOP_MODE
-
-        try:
-            future = self.move_stop_client.call_async(req)
-            future.add_done_callback(self._on_doosan_quick_stop_done)
-            self.get_logger().warn(f"{reason} - Doosan quick stop 요청 전송.")
-        except Exception as e:
-            self.get_logger().error(f"{reason} - Doosan quick stop 요청 실패: {e}")
-
-    def ensure_move_stop_service_ready(self):
-        if self.move_stop_client.service_is_ready():
-            return True
-
-        if self.move_stop_client.wait_for_service(timeout_sec=0.5):
-            return True
-
-        try:
-            service_names = [name for name, _ in self.action_node.get_service_names_and_types()]
-            candidates = sorted(name for name in service_names if name.endswith('/motion/move_stop'))
-            if candidates and candidates[0] != self.move_stop_service_name:
-                self.move_stop_service_name = candidates[0]
-                self.move_stop_client = self.action_node.create_client(MoveStop, self.move_stop_service_name)
-                self.get_logger().warn(f"Doosan move_stop service 재연결 시도: {self.move_stop_service_name}")
-        except Exception as e:
-            self.get_logger().warn(f"Doosan move_stop service 검색 실패: {e}")
-
-        return self.move_stop_client.wait_for_service(timeout_sec=1.0)
-
-    def _on_doosan_quick_stop_done(self, future):
-        try:
-            result = future.result()
-        except Exception as e:
-            self.get_logger().error(f"Doosan quick stop 응답 실패: {e}")
-            return
-
-        if result and result.success:
-            self.get_logger().warn("Doosan quick stop 처리 완료.")
-        else:
-            self.get_logger().error("Doosan quick stop 처리 실패.")
 
     def update_hand_obstacle(self, x, y, z):
         """Spawns/Updates hand obstacle in the MoveIt planning scene."""
@@ -834,8 +776,6 @@ class JengaInspectorNode(Node):
                 self.last_moveit_error_code = 'HMI_STOP' if self.hmi_stop_requested or self.hmi_cancel_requested else 'HAND_DETECTED'
                 cancel_after_accept = True
                 self.get_logger().warn('정지 조건 감지: MoveGroup goal 수락 즉시 취소합니다.')
-                if getattr(self, 'in_push_sequence', False):
-                    self.request_doosan_quick_stop("밀기 goal 전송 중 손 감지")
                 break
             time.sleep(0.05)
 
@@ -865,8 +805,6 @@ class JengaInspectorNode(Node):
         while rclpy.ok() and not result_future.done():
             if hand_blocks_motion() and not getattr(self, 'in_evasion', False):
                 self.get_logger().warn('정지 조건 감지: 현재 MoveGroup 실행을 취소합니다.')
-                if getattr(self, 'in_push_sequence', False):
-                    self.request_doosan_quick_stop("밀기 실행 중 손 감지")
                 cancel_future = goal_handle.cancel_goal_async()
                 while rclpy.ok() and not cancel_future.done():
                     time.sleep(0.01)
