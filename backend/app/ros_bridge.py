@@ -47,6 +47,7 @@ class VoiceBridgeNode(Node):
         super().__init__("voice_confirm_bridge")
         self._pending = None          # confirm_tools 대기 슬롯 (한 번에 하나만 가능)
         self._pending_release = None  # confirm_release 대기 슬롯 (한 번에 하나만 가능)
+        self._jenga_inspection_running = False
 
         # confirm_tools/confirm_release 콜백은 각각 최대 60초 threading.Event().wait()로
         # 블로킹된다. 실행기가 SingleThreadedExecutor면 그동안 다른 콜백(다른 쪽 확인 요청,
@@ -82,6 +83,7 @@ class VoiceBridgeNode(Node):
         """HMI 직접 실행 버튼. 음성 명령 없이 젠가 품질검사를 시작한다."""
         if not self._jenga_inspection_cli.service_is_ready():
             return False
+        self._jenga_inspection_running = True
         future = self._jenga_inspection_cli.call_async(Trigger.Request())
         future.add_done_callback(self._on_jenga_inspection_done)
         self.get_logger().info("HMI 직접 실행으로 젠가 품질 검사를 시작했습니다.")
@@ -123,19 +125,29 @@ class VoiceBridgeNode(Node):
         self._publish_pick_task_data(result.message, "get_keyword_done")
         self._hmi_get_keyword_in_flight = False
 
+    def _broadcast_alert(self, msg: str):
+        if _loop:
+            asyncio.run_coroutine_threadsafe(broadcast({"type": "alert", "message": msg}), _loop)
+
     def _on_jenga_inspection_done(self, future):
         try:
             result = future.result()
         except Exception as e:
             self.get_logger().error(f"run_jenga_inspection 호출 실패: {e}")
+            self._broadcast_alert(f"검사 실패: {e}")
+            self._jenga_inspection_running = False
             return
         if result is None:
             self.get_logger().error("run_jenga_inspection 응답 없음")
+            self._broadcast_alert("검사 실패: 로봇 응답 없음")
+            self._jenga_inspection_running = False
             return
         if result.success:
             self.get_logger().info(f"run_jenga_inspection 완료: {result.message}")
         else:
             self.get_logger().error(f"run_jenga_inspection 실패: {result.message}")
+            self._broadcast_alert(f"검사 실패: {result.message}")
+        self._jenga_inspection_running = False
 
     def _start_pending(self, kind: str, tools, targets) -> dict:
         """DB에 pending row 생성 + 화면에 띄울 payload 구성."""
