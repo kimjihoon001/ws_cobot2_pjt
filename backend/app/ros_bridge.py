@@ -143,6 +143,10 @@ class VoiceBridgeNode(Node):
         self._last_pick_task_at = 0.0
         self._tool_task_active = False
         self._tool_task_status_message = ""
+        self._last_alert_kind = ""
+        self._last_alert_at = 0.0
+        self._last_alert_payload = None
+        self._last_alert_id = 0
         self.get_logger().info("VoiceBridgeNode 준비 완료 (confirm_tools/confirm_release 서비스 대기 중)")
 
     def _handle_joint_state(self, msg: JointState):
@@ -372,6 +376,11 @@ class VoiceBridgeNode(Node):
         """HMI 긴급정지. MoveIt 목표 취소, 작업 노드 중단 신호, controller 정지를 요청한다."""
         self._jenga_inspection_running = False
         self._hmi_get_keyword_in_flight = False
+        self._pending = None
+        self._pending_release = None
+        self._tool_task_active = False
+        self._tool_task_status_message = ""
+        self._last_pick_task_at = 0.0
         self._estop_active = True
         self._estop_message = "HMI 긴급정지 활성화"
         self.get_logger().warning("HMI 긴급정지 요청 수신")
@@ -410,6 +419,13 @@ class VoiceBridgeNode(Node):
             for _ in range(3):
                 self._hmi_stop_pub.publish(release_msg)
 
+            self._jenga_inspection_running = False
+            self._hmi_get_keyword_in_flight = False
+            self._pending = None
+            self._pending_release = None
+            self._tool_task_active = False
+            self._tool_task_status_message = ""
+            self._last_pick_task_at = 0.0
             self._estop_active = False
             self._estop_message = "HMI 긴급정지 해제 완료"
 
@@ -531,15 +547,90 @@ class VoiceBridgeNode(Node):
         self._hmi_get_keyword_in_flight = False
 
     def _broadcast_alert(self, msg: str):
+        try:
+            payload = json.loads(msg)
+            if not isinstance(payload, dict):
+                raise ValueError("alert payload must be an object")
+        except Exception:
+            payload = {"message": msg}
+        payload.setdefault("type", "alert")
+        if payload.get("type") == "alert":
+            self._last_alert_id = int(time.time() * 1000)
+            payload["id"] = self._last_alert_id
+            self._last_alert_payload = dict(payload)
+            if payload.get("kind"):
+                self._last_alert_kind = str(payload["kind"])
+                self._last_alert_at = time.monotonic()
+            self.get_logger().warning(
+                f"HMI alert queued: kind={payload.get('kind', 'generic')}, title={payload.get('title', '경고')}"
+            )
         if _loop:
-            try:
-                payload = json.loads(msg)
-                if not isinstance(payload, dict):
-                    raise ValueError("alert payload must be an object")
-            except Exception:
-                payload = {"message": msg}
-            payload.setdefault("type", "alert")
             asyncio.run_coroutine_threadsafe(broadcast(payload), _loop)
+
+    def get_latest_alert(self) -> dict:
+        return {"alert": self._last_alert_payload}
+
+    def _recent_alert_sent(self, kind: str, within_sec: float = 5.0) -> bool:
+        return self._last_alert_kind == kind and time.monotonic() - self._last_alert_at < within_sec
+
+    def _broadcast_jenga_failure_alert(self, message: str):
+        normalized = message or ""
+        if "충분히 사진" in message or "사진" in message and "위치" in message:
+            kind = "jenga_insufficient_images"
+            if self._recent_alert_sent(kind):
+                return
+            self._broadcast_alert(json.dumps({
+                "type": "alert",
+                "kind": kind,
+                "title": "젠가 촬영 부족",
+                "message": "각 면당 필요한 사진을 충분히 확보하지 못했습니다. 젠가 위치를 조정한 뒤 재검사하거나 작업을 취소하세요.",
+                "actions": [
+                    {"label": "재검사", "command": "retry_jenga", "variant": "primary"},
+                    {"label": "작업 취소", "command": "cancel_task", "variant": "danger"},
+                ],
+            }, ensure_ascii=False))
+            return
+        if "젠가 블록을 찾지 못" in message or "범위를 벗어" in message:
+            kind = "jenga_missing"
+            if self._recent_alert_sent(kind):
+                return
+            self._broadcast_alert(json.dumps({
+                "type": "alert",
+                "kind": kind,
+                "title": "젠가 미검출",
+                "message": "젠가를 찾지 못했거나 감지 범위를 벗어났습니다. 위치를 확인한 뒤 재검사하거나 작업을 취소하세요.",
+                "actions": [
+                    {"label": "재검사", "command": "retry_jenga", "variant": "primary"},
+                    {"label": "작업 취소", "command": "cancel_task", "variant": "danger"},
+                ],
+            }, ensure_ascii=False))
+            return
+        kind = "jenga_inspection_failed"
+        if self._recent_alert_sent(kind):
+            return
+        self._broadcast_alert(json.dumps({
+            "type": "alert",
+            "kind": kind,
+            "title": "젠가 검사 실패",
+            "message": normalized or "젠가 검사가 실패했습니다. 상태를 확인한 뒤 재검사하거나 작업을 취소하세요.",
+            "actions": [
+                {"label": "재검사", "command": "retry_jenga", "variant": "primary"},
+                {"label": "작업 취소", "command": "cancel_task", "variant": "danger"},
+            ],
+        }, ensure_ascii=False))
+
+    def force_jenga_insufficient_images_alert(self) -> dict:
+        self._broadcast_alert(json.dumps({
+            "type": "alert",
+            "kind": "jenga_insufficient_images",
+            "title": "젠가 촬영 부족",
+            "message": "각 면당 필요한 사진을 충분히 확보하지 못했습니다. 젠가 위치를 조정한 뒤 재검사하거나 작업을 취소하세요.",
+            "actions": [
+                {"label": "재검사", "command": "retry_jenga", "variant": "primary"},
+                {"label": "작업 취소", "command": "cancel_task", "variant": "danger"},
+            ],
+        }, ensure_ascii=False))
+        return {"success": True, "message": "젠가 촬영 부족 테스트 팝업을 생성했습니다."}
 
     def _on_jenga_inspection_done(self, future):
         try:
@@ -558,6 +649,7 @@ class VoiceBridgeNode(Node):
             self.get_logger().info(f"run_jenga_inspection 완료: {result.message}")
         else:
             self.get_logger().error(f"run_jenga_inspection 실패: {result.message}")
+            self._broadcast_jenga_failure_alert(str(result.message))
         self._jenga_inspection_running = False
 
     def _start_pending(self, kind: str, tools, targets) -> dict:

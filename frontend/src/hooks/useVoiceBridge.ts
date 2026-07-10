@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import * as robotApi from '../api/robot'
 
 export interface PendingConfirm {
   id: number
@@ -23,12 +24,24 @@ export interface HmiAlert {
 
 const API_BASE = 'http://127.0.0.1:8000'
 
+function toHmiAlert(payload: robotApi.HmiAlertPayload): HmiAlert {
+  return {
+    id: payload.id ?? Date.now(),
+    kind: payload.kind ?? 'generic',
+    title: payload.title ?? '경고',
+    message: payload.message ?? String(payload.message ?? ''),
+    imageUrl: payload.image_url,
+    actions: payload.actions ?? [{ label: '확인', command: 'dismiss', variant: 'primary' }],
+  }
+}
+
 export function useVoiceBridge(url = 'ws://127.0.0.1:8000/ws') {
   const wsRef = useRef<WebSocket | null>(null)
   const [pending, setPending] = useState<PendingConfirm | null>(null)
   const [pendingRelease, setPendingRelease] = useState<PendingConfirm | null>(null)
   const [connected, setConnected] = useState(false)
   const [hmiAlert, setHmiAlert] = useState<HmiAlert | null>(null)
+  const lastAlertIdRef = useRef<number | null>(null)
 
   // WS는 폴링 주기(1초)보다 빠르게 새 요청이 생겼다는 걸 알아채는 용도로만 사용 —
   // 실제 정답 소스와 응답 제출은 전부 DB 기반 REST(/api/voice/requests/*)로 처리한다.
@@ -45,14 +58,9 @@ export function useVoiceBridge(url = 'ws://127.0.0.1:8000/ws') {
         try {
           const payload = JSON.parse(event.data)
           if (payload.type === 'alert') {
-            setHmiAlert({
-              id: Date.now(),
-              kind: payload.kind ?? 'generic',
-              title: payload.title ?? '경고',
-              message: payload.message ?? String(payload.message ?? ''),
-              imageUrl: payload.image_url,
-              actions: payload.actions ?? [{ label: '확인', command: 'dismiss', variant: 'primary' }],
-            })
+            const alert = toHmiAlert(payload)
+            lastAlertIdRef.current = alert.id
+            setHmiAlert(alert)
           }
         } catch {}
       }
@@ -72,6 +80,23 @@ export function useVoiceBridge(url = 'ws://127.0.0.1:8000/ws') {
       wsRef.current?.close()
     }
   }, [url])
+
+  useEffect(() => {
+    const poll = window.setInterval(async () => {
+      try {
+        const data = await robotApi.getLatestAlert()
+        if (!data.alert) return
+        const alert = toHmiAlert(data.alert)
+        if (lastAlertIdRef.current === alert.id) return
+        lastAlertIdRef.current = alert.id
+        setHmiAlert(alert)
+      } catch {
+        // WS가 살아 있으면 다음 메시지로 보완되고, 아니면 다음 폴링에서 재시도한다.
+      }
+    }, 1000)
+
+    return () => window.clearInterval(poll)
+  }, [])
 
   useEffect(() => {
     const poll = window.setInterval(async () => {

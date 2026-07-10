@@ -13,6 +13,7 @@ from scipy.spatial.transform import Rotation
 
 import rclpy
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from sensor_msgs.msg import Image, CameraInfo
 try:
     from ultralytics import YOLO
@@ -107,6 +108,7 @@ DOOSAN_MOVE_STOP_SERVICE = f'/{ROBOT_ID}/motion/move_stop'
 class JengaInspectorNode(Node):
     def __init__(self):
         super().__init__("jenga_inspector")
+        self.declare_parameter("force_insufficient_images_alert", False)
         self.package_path = get_package_share_directory("robot_control")
         self.init_database()
         
@@ -1181,6 +1183,17 @@ class JengaInspectorNode(Node):
         msg.data = json.dumps(payload, ensure_ascii=False)
         self.hmi_alert_pub.publish(msg)
 
+    def _consume_force_insufficient_images_alert(self):
+        force_by_param = bool(self.get_parameter("force_insufficient_images_alert").value)
+        force_by_env = os.getenv("JENGA_FORCE_INSUFFICIENT_IMAGES", "").lower() in {"1", "true", "yes", "on"}
+        if force_by_param:
+            self.set_parameters([Parameter(
+                "force_insufficient_images_alert",
+                Parameter.Type.BOOL,
+                False,
+            )])
+        return force_by_param or force_by_env
+
     def remove_jenga_mesh(self):
         """Removes the spawned Jenga mesh from the MoveIt planning scene."""
         obj = CollisionObject()
@@ -1405,6 +1418,10 @@ class JengaInspectorNode(Node):
                 if len(face_successful_poses[idx1]) >= 2 and len(face_successful_poses[idx2]) >= 2:
                     best_pair = (idx1, idx2)
                     break
+
+        if self._consume_force_insufficient_images_alert():
+            self.get_logger().warn("테스트 설정으로 젠가 촬영 부족 예외를 강제 발생합니다.")
+            best_pair = None
 
         if best_pair is None:
             self.get_logger().error("충분한 사진을 찍을 수 없습니다 (각 면당 최소 2장 확보 실패). 검사 취소.")
