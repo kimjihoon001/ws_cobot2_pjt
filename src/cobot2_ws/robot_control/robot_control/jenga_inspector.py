@@ -1137,7 +1137,7 @@ class JengaInspectorNode(Node):
         res = future.result()
         if not res or len(res.depth_position) < 4 or sum(res.depth_position[:3]) == 0:
             response.success = False
-            response.message = "Failed to detect Jenga block 'top' or coordinates out of range"
+            response.message = "젠가 블록을 찾지 못했거나 범위를 벗어났습니다."
             return
   
         x_cam, y_cam, z_cam, yaw_cam = res.depth_position[:4]
@@ -1180,21 +1180,21 @@ class JengaInspectorNode(Node):
                     self.get_logger().warn(f"IK solution FAILED for {face_names[i]} Face at Pitch {p}°")
 
         # 6층 맵 패턴 매칭을 위해 면1(Right)과 면2(Back)를 스캔
-        # 만약 둘 중 하나라도 IK가 실패하면 인접한 다른 2면을 찾음
-        if len(face_successful_poses[1]) > 0 and len(face_successful_poses[2]) > 0:
+        # 각 면당 최소 2장 이상의 사진(IK)을 확보해야 함
+        if len(face_successful_poses[1]) >= 2 and len(face_successful_poses[2]) >= 2:
             best_pair = (1, 2)
         else:
             adjacent_pairs = [(0, 1), (1, 2), (2, 3), (3, 0)]
             best_pair = None
             for idx1, idx2 in adjacent_pairs:
-                if len(face_successful_poses[idx1]) > 0 and len(face_successful_poses[idx2]) > 0:
+                if len(face_successful_poses[idx1]) >= 2 and len(face_successful_poses[idx2]) >= 2:
                     best_pair = (idx1, idx2)
                     break
 
         if best_pair is None:
-            self.get_logger().error("No valid IK poses found for any adjacent faces. Aborting inspection.")
+            self.get_logger().error("충분한 사진을 찍을 수 없습니다 (각 면당 최소 2장 확보 실패). 검사 취소.")
             response.success = False
-            response.message = "Failed to find any valid IK configurations"
+            response.message = "충분히 사진을 찍을 수 없는 위치입니다. 젠가를 다시 배치해주세요."
             return
             
         idx1, idx2 = best_pair
