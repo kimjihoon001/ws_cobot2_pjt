@@ -123,7 +123,7 @@ class JengaInspectorNode(Node):
 
         workspace_path = possible_ws_paths[0]
         for path in possible_ws_paths:
-            if os.path.exists(os.path.join(path, 'src/yolov8_ws/model/best_3.onnx')):
+            if os.path.exists(os.path.join(path, 'src/yolov8_ws/model/best_15.onnx')):
                 workspace_path = path
                 break
 
@@ -142,7 +142,9 @@ class JengaInspectorNode(Node):
         except Exception as e:
             self.get_logger().error(f"컨베이어 시리얼 연결 실패 - 컨베이어 이동 없이 진행: {e}")
 
-        model_path = os.path.join(workspace_path, 'src/yolov8_ws/model/best_3.onnx')
+        model_path = os.path.join(workspace_path, 'src/yolov8_ws/model/best_15.onnx')
+        if not os.path.exists(model_path):
+            model_path = os.path.join(workspace_path, 'src/yolov8_ws/model/best_3.onnx')
         if not os.path.exists(model_path):
             model_path = os.path.join(workspace_path, 'src/yolov8_ws/model/best_2.onnx')
         self.model = YOLO(model_path, task='detect')

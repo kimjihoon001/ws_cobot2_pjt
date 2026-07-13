@@ -104,7 +104,7 @@ export function JengaMapVisualizer({ mapData }: JengaMapProps) {
             {parsedMapData.images.map((imgUrl, idx) => (
               <img 
                 key={idx} 
-                src={imgUrl}
+                src={imgUrl?.startsWith('/') ? `http://127.0.0.1:8000${imgUrl}` : imgUrl}
                 alt={`Inspection view ${idx}`}
                 style={{ height: '400px', borderRadius: '8px', border: '1px solid var(--border-color)', objectFit: 'cover', flexShrink: 0 }}
               />

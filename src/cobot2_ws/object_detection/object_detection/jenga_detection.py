@@ -18,7 +18,7 @@ from object_detection.realsense import ImgNode
 PACKAGE_NAME = "object_detection"
 PACKAGE_PATH = get_package_share_directory(PACKAGE_NAME)
 
-YOLO_MODEL_FILENAME = "bestjenga.onnx"
+YOLO_MODEL_FILENAME = "best_15.onnx"
 YOLO_CLASS_NAME_JSON = "class_name_jenga.json"
 
 YOLO_MODEL_PATH = os.path.join(PACKAGE_PATH, "resource", YOLO_MODEL_FILENAME)
