@@ -423,11 +423,13 @@ class JengaInspectorNode(Node):
         pos_to_idx = {"Left": 0, "Center": 1, "Right": 2}
         mirror_pos = {"Left": "Right", "Center": "Center", "Right": "Left"}
         
-        # 방향에 상관없이 YOLO가 찾아낸 구멍을 거울 반전(Mirror) 없이 그대로 맵에 반영합니다.
-        # (양품 템플릿이 좌우 대칭이므로, 보는 방향에 따라 좌우가 뒤바뀌어도 무방하다는 사용자 요청)
+        # 반대편(Back, Left)에서 찍은 사진은 기하학적으로 좌우가 반전되므로
+        # face_id가 2(Back) 또는 3(Left)일 경우 mirror_pos를 적용하여 보정합니다.
         for face_id, data in self.inspection_data.items():
             for floor, pos in data:
                 if 1 <= floor <= 6:
+                    if face_id in [2, 3]:
+                        pos = mirror_pos[pos]
                     jenga_map[floor][pos_to_idx[pos]] = "X"
 
 
