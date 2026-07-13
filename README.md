@@ -1,6 +1,8 @@
-# 🤖 Collaborative Robot Smart Assembly and Quality Inspection System
+# 🤖 Collaborative Robot Assistance and Quality Inspection System
+조 이름:A-2조
+팀명: k3j1
 
-본 프로젝트는 두산 협동 로봇(m0609), 3D 비전 카메라, 그리고 음성 인식을 활용하여 **스마트 조립, 공구 픽업, 그리고 젠가 품질 검사**를 수행하는 통합 시스템입니다.
+**A-2조**의 본 프로젝트는 두산 협동 로봇(m0609), 3D 비전 카메라, 그리고 음성 인식을 활용하여 **공구 픽업, 그리고 젠가 품질 검사**를 수행하는 통합 시스템입니다.
 
 ---
 
